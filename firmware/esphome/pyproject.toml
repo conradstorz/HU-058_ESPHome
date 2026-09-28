@@ -1,0 +1,21 @@
+[project]
+name = "hu058-esphome"
+version = "0.1.0"
+description = "Flashing tool for HU-058 clocks running ESPHome"
+requires-python = ">=3.12"
+dependencies = [
+    "esphome>=2026.9.0",
+    "esptool>=5.0",
+    "pyserial>=3.5",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
