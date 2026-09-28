@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import re
 import secrets as pysecrets
 import subprocess
@@ -152,10 +153,124 @@ def append_secrets(path: Path, entries: dict[str, str], comment: str) -> None:
     text = path.read_text() if path.exists() else ""
     if text and not text.endswith("\n"):
         text += "\n"
-    lines = "".join(f'{k}: "{v}"\n' for k, v in entries.items())
+    lines = "".join(f"{k}: {json.dumps(v)}\n" for k, v in entries.items())
     path.write_text(f"{text}\n# {comment}\n{lines}")
 
 
 def missing_secrets(path: Path, names: list[str]) -> list[str]:
     present = _secret_keys(path)
     return [n for n in names if n not in present]
+
+
+# --- I/O --------------------------------------------------------------------
+
+def _comports():
+    from serial.tools import list_ports
+    return list_ports.comports()
+
+
+def find_port(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    usb = [p for p in _comports() if p.vid is not None]
+    if not usb:
+        raise FlashError("No USB serial port found. Plug the clock in, or pass --port.")
+    if len(usb) > 1:
+        listing = ", ".join(f"{p.device} ({p.description})" for p in usb)
+        raise FlashError(f"More than one USB serial port: {listing}. Pass --port.")
+    return usb[0].device
+
+
+def read_mac(port: str) -> str:
+    cmd = [sys.executable, "-m", "esptool", "--port", port, "read-mac"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise FlashError(f"esptool failed on {port}:\n{r.stdout}{r.stderr}")
+    return parse_mac_output(r.stdout)
+
+
+def _now() -> datetime:
+    return datetime.now()
+
+
+# --- resolution -------------------------------------------------------------
+
+def resolve_device(
+    mac: str,
+    now: datetime,
+    registry_path: Path,
+    secrets_path: Path,
+    device_dir: Path,
+) -> tuple[Device, bool]:
+    """Return the Device for this MAC, registering it first if it is new."""
+    mac = normalize_mac(mac)
+    devices = load_registry(registry_path)
+    device = find_device(devices, mac)
+    is_new = device is None
+
+    if device is None:
+        name, friendly_name = mint_name(now)
+        if any(d.name == name for d in devices):
+            raise FlashError(
+                f"A clock named {name} was registered less than a minute ago. "
+                "Wait for the next minute and run again."
+            )
+        api_key_name, ota_password_name = secret_names(name)
+        append_secrets(
+            secrets_path,
+            {api_key_name: generate_api_key(), ota_password_name: generate_ota_password()},
+            comment=name,
+        )
+        device = Device(mac, name, friendly_name, now.isoformat(timespec="seconds"))
+        devices.append(device)
+        save_registry(registry_path, devices)
+    else:
+        missing = missing_secrets(secrets_path, list(secret_names(device.name)))
+        if missing:
+            raise FlashError(
+                f"{device.name} is registered but {secrets_path.name} is missing "
+                f"{', '.join(missing)}. Secrets are never regenerated for a known clock, "
+                "because Home Assistant already has the old ones. Restore them by hand."
+            )
+
+    device_file = device_dir / f"{device.name}.yaml"
+    if not device_file.exists():
+        device_file.write_text(render_device_yaml(device.name, device.friendly_name))
+    return device, is_new
+
+
+# --- CLI --------------------------------------------------------------------
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Flash an HU-058 clock, minting or reusing its identity by MAC address.",
+        epilog="Any other arguments are passed through to `esphome run`, e.g. --no-logs.",
+    )
+    parser.add_argument("--port", help="serial port, e.g. COM4. Default: the only USB serial port present.")
+    parser.add_argument("--register-only", action="store_true", help="register the clock and write its files, but do not flash.")
+    args, extra = parser.parse_known_args(argv)
+
+    try:
+        port = find_port(args.port)
+        mac = read_mac(port)
+        device, is_new = resolve_device(mac, _now(), REGISTRY_PATH, SECRETS_PATH, HERE)
+    except FlashError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    api_key_name, _ = secret_names(device.name)
+    if is_new:
+        print(f"New clock on {port} with MAC {mac}: registered as {device.name} ({device.friendly_name}).")
+        print(f"When Home Assistant asks for an encryption key, use {api_key_name} from secrets.yaml.")
+    else:
+        print(f"Known clock on {port} with MAC {mac}: {device.name} ({device.friendly_name}).")
+
+    if args.register_only:
+        return 0
+
+    cmd = [sys.executable, "-m", "esphome", "run", f"{device.name}.yaml", "--device", port, *extra]
+    return subprocess.call(cmd, cwd=HERE)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

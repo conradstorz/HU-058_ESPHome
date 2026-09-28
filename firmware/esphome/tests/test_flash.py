@@ -139,3 +139,187 @@ def test_missing_secrets_lists_absent_names(tmp_path):
 
 def test_missing_secrets_when_file_absent(tmp_path):
     assert flash.missing_secrets(tmp_path / "secrets.yaml", ["a"]) == ["a"]
+
+
+def test_append_secrets_escapes_quotes_and_backslashes(tmp_path):
+    path = tmp_path / "secrets.yaml"
+    path.write_text("")
+    flash.append_secrets(path, {"odd": 'say "hi" \\ bye'}, comment="odd")
+    assert yaml.safe_load(path.read_text()) == {"odd": 'say "hi" \\ bye'}
+
+
+# --- port discovery ---------------------------------------------------------
+
+class _Port:
+    def __init__(self, device, vid=None, description=""):
+        self.device, self.vid, self.description = device, vid, description
+
+
+def test_find_port_explicit_wins(monkeypatch):
+    monkeypatch.setattr(flash, "_comports", lambda: [_Port("COM3", 0x0403), _Port("COM9", 0x10C4)])
+    assert flash.find_port("COM9") == "COM9"
+
+
+def test_find_port_single_usb_serial(monkeypatch):
+    monkeypatch.setattr(flash, "_comports", lambda: [_Port("COM1"), _Port("COM4", 0x0403, "USB Serial Port")])
+    assert flash.find_port(None) == "COM4"
+
+
+def test_find_port_none_found(monkeypatch):
+    monkeypatch.setattr(flash, "_comports", lambda: [_Port("COM1")])
+    with pytest.raises(flash.FlashError, match="No USB serial"):
+        flash.find_port(None)
+
+
+def test_find_port_ambiguous(monkeypatch):
+    monkeypatch.setattr(flash, "_comports", lambda: [_Port("COM3", 0x0403), _Port("COM4", 0x0403)])
+    with pytest.raises(flash.FlashError, match="COM3"):
+        flash.find_port(None)
+
+
+# --- read_mac ---------------------------------------------------------------
+
+def test_read_mac_runs_esptool(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = "MAC: 20:50:0D:17:F4:58\n"
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(flash.subprocess, "run", fake_run)
+    assert flash.read_mac("COM4") == "20:50:0d:17:f4:58"
+    assert calls[0][:2] == [flash.sys.executable, "-m"]
+    assert "esptool" in calls[0]
+    assert "COM4" in calls[0]
+    assert "read-mac" in calls[0]
+
+
+def test_read_mac_failure_is_flash_error(monkeypatch):
+    def fake_run(cmd, **kw):
+        class R:
+            returncode = 2
+            stdout = ""
+            stderr = "A fatal error occurred: Could not open COM4"
+        return R()
+
+    monkeypatch.setattr(flash.subprocess, "run", fake_run)
+    with pytest.raises(flash.FlashError, match="Could not open COM4"):
+        flash.read_mac("COM4")
+
+
+# --- resolve_device ---------------------------------------------------------
+
+NOW = datetime(2026, 9, 28, 14, 7, 0)
+
+
+def _layout(tmp_path):
+    reg = tmp_path / "devices.yaml"
+    sec = tmp_path / "secrets.yaml"
+    sec.write_text('wifi_ssid: "x"\n')
+    return reg, sec
+
+
+def test_resolve_new_device_creates_everything(tmp_path):
+    reg, sec = _layout(tmp_path)
+    device, is_new = flash.resolve_device("AA:BB:CC:DD:EE:FF", NOW, reg, sec, tmp_path)
+
+    assert is_new is True
+    assert device == flash.Device("aa:bb:cc:dd:ee:ff", "clock-20260928-1407", "Clock 2026-09-28 14:07", "2026-09-28T14:07:00")
+    assert flash.load_registry(reg) == [device]
+    assert (tmp_path / "clock-20260928-1407.yaml").read_text() == flash.render_device_yaml(device.name, device.friendly_name)
+    secrets_now = yaml.safe_load(sec.read_text())
+    assert secrets_now["wifi_ssid"] == "x"
+    assert len(secrets_now["api_key_clock_20260928_1407"]) == 44
+    assert len(secrets_now["ota_password_clock_20260928_1407"]) == 32
+
+
+def test_resolve_known_device_reuses_and_touches_nothing(tmp_path):
+    reg, sec = _layout(tmp_path)
+    flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+    before = (sec.read_text(), reg.read_text(), (tmp_path / "clock-20260928-1407.yaml").read_text())
+
+    device, is_new = flash.resolve_device("aa:bb:cc:dd:ee:ff", datetime(2030, 1, 1), reg, sec, tmp_path)
+
+    assert is_new is False
+    assert device.name == "clock-20260928-1407"
+    assert (sec.read_text(), reg.read_text(), (tmp_path / "clock-20260928-1407.yaml").read_text()) == before
+
+
+def test_resolve_known_device_regenerates_missing_yaml(tmp_path):
+    reg, sec = _layout(tmp_path)
+    flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+    (tmp_path / "clock-20260928-1407.yaml").unlink()
+
+    device, _ = flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+
+    assert (tmp_path / "clock-20260928-1407.yaml").read_text() == flash.render_device_yaml(device.name, device.friendly_name)
+
+
+def test_resolve_known_device_with_missing_secret_errors(tmp_path):
+    reg, sec = _layout(tmp_path)
+    flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+    sec.write_text('wifi_ssid: "x"\n')  # secrets lost
+
+    with pytest.raises(flash.FlashError, match="api_key_clock_20260928_1407"):
+        flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+    # Nothing was regenerated.
+    assert yaml.safe_load(sec.read_text()) == {"wifi_ssid": "x"}
+
+
+def test_resolve_two_devices_same_minute_errors(tmp_path):
+    reg, sec = _layout(tmp_path)
+    flash.resolve_device("aa:bb:cc:dd:ee:01", NOW, reg, sec, tmp_path)
+    with pytest.raises(flash.FlashError, match="clock-20260928-1407"):
+        flash.resolve_device("aa:bb:cc:dd:ee:02", NOW, reg, sec, tmp_path)
+    assert len(flash.load_registry(reg)) == 1
+
+
+# --- main -------------------------------------------------------------------
+
+def test_main_register_only_does_not_flash(tmp_path, monkeypatch, capsys):
+    reg, sec = _layout(tmp_path)
+    monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(flash, "SECRETS_PATH", sec)
+    monkeypatch.setattr(flash, "HERE", tmp_path)
+    monkeypatch.setattr(flash, "find_port", lambda explicit: "COM4")
+    monkeypatch.setattr(flash, "read_mac", lambda port: "aa:bb:cc:dd:ee:ff")
+    monkeypatch.setattr(flash, "_now", lambda: NOW)
+    monkeypatch.setattr(flash.subprocess, "call", lambda *a, **k: pytest.fail("esphome must not run"))
+
+    rc = flash.main(["--register-only"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "New clock" in out
+    assert "clock-20260928-1407" in out
+    assert "api_key_clock_20260928_1407" in out
+
+
+def test_main_flashes_known_device_and_passes_args(tmp_path, monkeypatch):
+    reg, sec = _layout(tmp_path)
+    flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+    monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(flash, "SECRETS_PATH", sec)
+    monkeypatch.setattr(flash, "HERE", tmp_path)
+    monkeypatch.setattr(flash, "find_port", lambda explicit: "COM4")
+    monkeypatch.setattr(flash, "read_mac", lambda port: "aa:bb:cc:dd:ee:ff")
+    calls = []
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: calls.append((cmd, kw)) or 7)
+
+    rc = flash.main(["--no-logs"])
+
+    assert rc == 7
+    cmd, kw = calls[0]
+    assert cmd[:2] == [flash.sys.executable, "-m"]
+    assert cmd[2:] == ["esphome", "run", "clock-20260928-1407.yaml", "--device", "COM4", "--no-logs"]
+    assert kw["cwd"] == tmp_path
+
+
+def test_main_reports_flash_error(monkeypatch, capsys):
+    monkeypatch.setattr(flash, "find_port", lambda explicit: (_ for _ in ()).throw(flash.FlashError("No USB serial port found")))
+    assert flash.main([]) == 1
+    assert "No USB serial port found" in capsys.readouterr().err
