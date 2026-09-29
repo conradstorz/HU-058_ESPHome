@@ -1,0 +1,9 @@
+# ESPHome build output and local secrets
+/.esphome/
+/secrets.yaml
+
+# Python
+/.venv/
+/venv/
+__pycache__/
+.pytest_cache/

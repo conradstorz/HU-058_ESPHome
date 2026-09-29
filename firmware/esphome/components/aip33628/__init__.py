@@ -56,7 +56,7 @@ CONFIG_SCHEMA = cv.Schema(
         # or the whole panel changes brightness whenever the colon blinks.
         cv.Optional(CONF_MAX_CURRENT, default=15): cv.int_range(min=0, max=15),
         # Power on defaults only. Home Assistant owns both at run time
-        # through the template switches in clock.yaml.
+        # through the template switches in clock-base.yaml.
         cv.Optional(CONF_TWELVE_HOUR, default=True): cv.boolean,
         cv.Optional(CONF_BLINK_COLON, default=True): cv.boolean,
     }

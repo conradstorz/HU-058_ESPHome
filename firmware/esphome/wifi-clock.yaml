@@ -1,0 +1,15 @@
+# Identity for one clock. Everything else is in clock-base.yaml.
+substitutions:
+  name: wifi-clock
+  friendly_name: WiFi Clock
+
+packages:
+  clock: !include clock-base.yaml
+
+api:
+  encryption:
+    key: !secret api_key_wifi_clock
+
+ota:
+  - platform: esphome
+    password: !secret ota_password_wifi_clock

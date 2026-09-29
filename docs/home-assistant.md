@@ -1,11 +1,19 @@
 # Home Assistant reference
 
-Needs ESPHome 2026.8.0 or newer.
+Needs ESPHome 2026.9.0 or newer.
 
 ## Naming
 
-The device is `wifi-clock`, so entities are `<domain>.wifi_clock_<object_id>`
-and actions are `esphome.wifi_clock_<name>`.
+Every clock is its own ESPHome node. Entities are
+`<domain>.<clock_name>_<object_id>` and actions are
+`esphome.<clock_name>_<action>`, with the hyphens in the clock's name turned
+into underscores. The first clock is `wifi-clock`, so it has
+`light.wifi_clock_display` and `esphome.wifi_clock_show_number`. A clock
+registered by `flash.py` is named from its first flash time, so
+`clock-20260928-1407` has `light.clock_20260928_1407_display` and
+`esphome.clock_20260928_1407_show_number`. See `firmware/esphome/README.md`.
+
+The tables and examples below use the first clock's names.
 
 ## Actions
 

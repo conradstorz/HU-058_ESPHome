@@ -15,8 +15,8 @@ An ESP32 connected via a USB cable with nothing attached to it will still boot, 
 WiFi and turn up in Home Assistant. Then when you connect the six wires the panel just
 lights up.
 
-1. Install ESPHome and fill in `secrets.yaml`.
-2. `esphome run clock.yaml` over USB, from this directory.
+1. `uv sync`, then copy `secrets.yaml.example` to `secrets.yaml` and fill in the WiFi entries.
+2. `uv run flash.py` with the ESP32 on USB, from this directory.
 3. Adopt the device in Home Assistant.
 4. Build the clock board, `../../docs/wiring.md`.
 5. Wire the six lines to the ESP32 and power it up.
@@ -26,21 +26,10 @@ component.
 
 ## Requirements
 
-ESPHome 2026.8.0 or newer, on Python 3.11 or newer.
-
-Install it into a virtual environment. Recent Linux distributions and Homebrew
-refuse a plain `pip install` into the system Python, and a user install puts
-the `esphome` command somewhere that is often not on PATH.
-
-```
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade esphome
-```
-
-On Windows, create it with `py -m venv venv` and activate with
-`venv\Scripts\activate`. Every `esphome` command below assumes the environment
-is active, and you activate it again in each new terminal.
+[uv](https://docs.astral.sh/uv/) and Python 3.12 or newer. `uv sync` in this
+directory installs ESPHome 2026.9.0 or newer, esptool and everything the
+flashing tool needs into `.venv/`. There is nothing to activate; every command
+in this README runs through `uv run`.
 
 ## Which ESP32
 
@@ -66,7 +55,7 @@ GPIO.out_w1ts = set;      // classic ESP32
 GPIO.out_w1ts.val = set;  // everything newer
 ```
 
-Nine lines in that one function, plus `board:` in `clock.yaml` changed to match
+Nine lines in that one function, plus `board:` in `clock-base.yaml` changed to match
 your module. Nothing else should need touching.
 
 Config validation will not warn you, because the component accepts any ESP32.
@@ -79,13 +68,16 @@ Nope, this requires an ESP32. The scan leans on `gptimer` and on that single-sto
 ## Setup
 
 ```
+uv sync
 cp secrets.yaml.example secrets.yaml
 ```
 
-On Windows that is `copy` instead of `cp`.
+On Windows that is `copy` instead of `cp`. `uv sync` installs ESPHome,
+esptool and the flashing tool's dependencies into `.venv/`; every command
+below is run through `uv run` so nothing needs activating.
 
-Fill in the WiFi credentials, timezone and API key the way the comments in
-that file describe.
+Fill in the WiFi credentials and the timezone. Leave the per-device entries
+alone, `flash.py` writes those.
 
 The timezone in `secrets.yaml` is a fallback for a boot with no Home Assistant.
 Change it to yours.
@@ -97,24 +89,53 @@ Do not add one there.
 ## Build and flash
 
 ```
-esphome run clock.yaml
+uv run flash.py
 ```
 
-USB flashing on a WROOM-32 devkit may need to hold down BOOT while trying to program. Auto-reset into the bootloader does not work on every board.
+Plug in one clock and run that. It reads the ESP32's factory MAC address over
+USB and looks it up in `devices.yaml`:
 
-Once it is on the network, updates go over the air, and the API carries the log stream:
+- **A clock it has never seen** gets a name from the current time,
+  `clock-YYYYMMDD-HHMM`, a fresh API key and OTA password appended to
+  `secrets.yaml`, an entry in `devices.yaml`, and a `<name>.yaml` device file
+  next to this README. Then it flashes.
+- **A clock it has seen** gets exactly the identity it had, so reflashing
+  never disturbs its pairing with Home Assistant.
+
+That is how several clocks live side by side: each one is a separate ESPHome
+node with its own secrets, all built from `clock-base.yaml`. The first clock
+ever built, `wifi-clock`, predates the registry and was entered by hand.
+
+It checks the chip before it writes anything. A board that is not an ESP32
+(the kit's own ESP8266, say) is refused with esptool's "This chip is ESP8266,
+not ESP32" message and nothing is registered.
+
+`--port COM7` picks the serial port when more than one USB adapter is
+plugged in. `--register-only` writes the files without flashing. Anything
+else on the command line goes straight to `esphome run`, so
+`uv run flash.py --no-logs` skips the log tail after upload.
+
+USB flashing on a WROOM-32 devkit may need to hold down BOOT while trying to
+program. Auto-reset into the bootloader does not work on every board.
+
+On Windows run these commands from PowerShell or cmd. A Git Bash / MSYS shell
+has been seen to compile with no error and produce no build output, so the
+upload then fails.
+
+Once it is on the network, updates go over the air, and the API carries the
+log stream. Use the clock's own device file:
 
 ```
-esphome run clock.yaml --device wifi-clock.local
-esphome logs clock.yaml --device wifi-clock.local
+uv run esphome run clock-20260928-1407.yaml --device clock-20260928-1407.local
+uv run esphome logs clock-20260928-1407.yaml --device clock-20260928-1407.local
 ```
 
 Two things to know before pushing an OTA build:
 
 - **A bad build is not recoverable remotely.** If it fails to bring up WiFi
   the only way back is a USB cable, which means opening the case. Compile
-  before uploading. The fallback access point in `clock.yaml` is the safety
-  net, so look for its setup SSID before assuming a flash is dead.
+  before uploading. The fallback access point in `clock-base.yaml` is the
+  safety net, so look for its setup SSID before assuming a flash is dead.
 - **Do not open the serial port for about a minute after an OTA.** Opening it
   asserts DTR, which resets the board before ESPHome marks the new partition
   valid, and the device rolls back to the previous image with no error
@@ -125,7 +146,14 @@ Two things to know before pushing an OTA build:
 Home Assistant finds the device on its own. Look under Settings > Devices and
 Services for a discovered ESPHome node.
 
-It asks for an encryption key. That is `api_key` out of your `secrets.yaml`.
+It asks for an encryption key. That is the `api_key_<name>` entry for this
+clock in your `secrets.yaml`; `flash.py` prints the exact entry name when it
+registers a new clock. Every clock has its own, so pick the one that matches
+the node Home Assistant discovered.
+
+The clock's actions appear in Home Assistant as `esphome.<name_>_<action>`,
+with the hyphens in the name turned into underscores, so a clock called
+`clock-20260928-1407` exposes `esphome.clock_20260928_1407_show_number`.
 
 Do this before you wire anything. Until the device is adopted the clock shows
 the time and ignores everything else, because the light, the switches and

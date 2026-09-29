@@ -1,0 +1,13 @@
+# Registry of every clock flashed from this directory, keyed by the ESP32
+# factory MAC address. flash.py appends to this and rewrites it, so keep
+# comments out of the entries themselves. MACs are quoted on purpose: an
+# all-digit MAC would otherwise parse as a YAML 1.1 sexagesimal integer.
+devices:
+- mac: 20:50:0d:17:f4:58
+  name: wifi-clock
+  friendly_name: WiFi Clock
+  first_flashed: '2026-09-28'
+- mac: 20:50:0d:70:b0:a4
+  name: clock-20260929-0912
+  friendly_name: Clock 2026-09-29 09:12
+  first_flashed: '2026-09-29T09:12:50'
