@@ -26,21 +26,10 @@ component.
 
 ## Requirements
 
-ESPHome 2026.8.0 or newer, on Python 3.11 or newer.
-
-Install it into a virtual environment. Recent Linux distributions and Homebrew
-refuse a plain `pip install` into the system Python, and a user install puts
-the `esphome` command somewhere that is often not on PATH.
-
-```
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade esphome
-```
-
-On Windows, create it with `py -m venv venv` and activate with
-`venv\Scripts\activate`. Every `esphome` command below assumes the environment
-is active, and you activate it again in each new terminal.
+[uv](https://docs.astral.sh/uv/) and Python 3.12 or newer. `uv sync` in this
+directory installs ESPHome 2026.9.0 or newer, esptool and everything the
+flashing tool needs into `.venv/`. There is nothing to activate; every command
+in this README runs through `uv run`.
 
 ## Which ESP32
 
@@ -124,6 +113,10 @@ else on the command line goes straight to `esphome run`, so
 
 USB flashing on a WROOM-32 devkit may need to hold down BOOT while trying to
 program. Auto-reset into the bootloader does not work on every board.
+
+On Windows run these commands from PowerShell or cmd. A Git Bash / MSYS shell
+has been seen to compile with no error and produce no build output, so the
+upload then fails.
 
 Once it is on the network, updates go over the air, and the API carries the
 log stream. Use the clock's own device file:

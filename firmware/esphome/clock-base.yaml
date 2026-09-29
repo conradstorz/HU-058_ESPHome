@@ -35,7 +35,8 @@ logger:
   level: INFO
 
 api:
-  # Called from Home Assistant automations as esphome.wifi_clock_<name>.
+  # Called from Home Assistant automations as esphome.<clock_name>_<action>,
+  # with the clock's name hyphens turned into underscores.
   # Temporary displays go back to the time on their own when the duration
   # runs out, so a failed automation cannot leave the clock showing stale data.
   actions:
