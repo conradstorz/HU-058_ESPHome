@@ -91,6 +91,11 @@ Assistant:
   for a few seconds. A unit of C or F lights the degree mark with the number.
 - A lamp test button that lights every populated LED white for three seconds,
   then returns to the time with the previous settings.
+- Any number of clocks side by side. `uv run flash.py` reads the ESP32's factory
+  MAC address over USB and gives a new board its own name, API key and OTA
+  password; a board it has seen before gets the same identity back, so
+  reflashing never disturbs its Home Assistant pairing. Details in
+  `firmware/esphome/README.md`.
 
 `firmware/esp32/panel-test/` is a bare-metal PlatformIO project that drives
 the same panel with nothing but the Arduino core. It is the better starting
@@ -135,7 +140,9 @@ frame per COM pair.
 
 With the ESP32 firmware, the clock shows NTP time. All configuration is done with Home Assistant which owns color and brightness along with effects and settings like 12/24hz time, etc. 
 
-Firmware updates go over the air, part of the ESPHome suite.
+Firmware updates go over the air, part of the ESPHome suite. Several clocks
+can run at once; each is its own ESPHome node, registered by MAC address in
+`firmware/esphome/devices.yaml`.
 
 Out of scope by choice: the buzzer, the light sensor and the NTC thermistor. The
 buttons are exposed to Home Assistant but carry no built-in behavior.

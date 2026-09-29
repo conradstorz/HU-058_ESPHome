@@ -106,6 +106,10 @@ That is how several clocks live side by side: each one is a separate ESPHome
 node with its own secrets, all built from `clock-base.yaml`. The first clock
 ever built, `wifi-clock`, predates the registry and was entered by hand.
 
+It checks the chip before it writes anything. A board that is not an ESP32
+(the kit's own ESP8266, say) is refused with esptool's "This chip is ESP8266,
+not ESP32" message and nothing is registered.
+
 `--port COM7` picks the serial port when more than one USB adapter is
 plugged in. `--register-only` writes the files without flashing. Anything
 else on the command line goes straight to `esphome run`, so
