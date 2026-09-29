@@ -120,6 +120,19 @@ Two things to know before pushing an OTA build:
   valid, and the device rolls back to the previous image with no error
   anywhere.
 
+### A second clock
+
+`clock-2.yaml` pulls `clock.yaml` in as a package and only changes the name:
+
+```
+esphome run clock-2.yaml
+```
+
+Copy it once per clock and edit the two names. Every clock built this way
+shares the API key and OTA password from `secrets.yaml`, which Home
+Assistant is fine with. Give a clock its own by adding `api:` and `ota:`
+blocks with different `!secret` names to its file.
+
 ## Adopt in Home Assistant
 
 Home Assistant finds the device on its own. Look under Settings > Devices and

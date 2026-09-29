@@ -1,0 +1,6 @@
+# Second clock. Copy this file, change the two names, flash it.
+substitutions:
+  name: kitchen-clock
+  friendly_name: Kitchen Clock
+packages:
+  base: !include clock.yaml
