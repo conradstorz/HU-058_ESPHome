@@ -111,7 +111,7 @@ class Aip33628Panel : public Component {
   }
   // Offline drops the upper colon dot, so a glance at the panel says whether
   // the time is still being kept honest. Driven from the wifi triggers in
-  // clock.yaml rather than by including the wifi component here.
+  // clock-base.yaml rather than by including the wifi component here.
   void set_online(bool v) {
     online_ = v;
     dirty_ = true;
@@ -125,7 +125,7 @@ class Aip33628Panel : public Component {
   // Called by the light platform. Color components and brightness are 0 to 1.
   void set_light(bool on, float r, float g, float b, float brightness);
 
-  // Temporary displays, driven from the api actions in clock.yaml. Each takes
+  // Temporary displays, driven from the api actions in clock-base.yaml. Each takes
   // a lifetime in milliseconds and falls back to the time when it runs out.
   void show_seconds(int ms);
   void show_number(int value, const std::string &unit, int ms);
