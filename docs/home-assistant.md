@@ -5,7 +5,9 @@ Needs ESPHome 2026.8.0 or newer.
 ## Naming
 
 The device is `wifi-clock`, so entities are `<domain>.wifi_clock_<object_id>`
-and actions are `esphome.wifi_clock_<name>`.
+and actions are `esphome.wifi_clock_<name>`. Each additional clock has its own
+name (see `firmware/esphome/README.md`), so substitute that name, hyphens
+turned into underscores.
 
 ## Actions
 

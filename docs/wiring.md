@@ -162,8 +162,8 @@ The heat lands in the driver rather than the LED, since each sink drops VDD
 minus the LED forward voltage. Do not park the panel at a high current step
 with most of it lit.
 
-The `max_current` setting in `clock.yaml` is the ceiling. Lowering it is how
-you run cooler.
+The `max_current` setting in `clock-base.yaml` is the ceiling. Lowering it is
+how you run cooler.
 
 ## First light
 
