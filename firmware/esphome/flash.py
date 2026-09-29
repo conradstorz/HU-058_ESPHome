@@ -98,7 +98,17 @@ class Device:
 def load_registry(path: Path) -> list[Device]:
     if not path.exists():
         return []
-    raw = yaml.safe_load(path.read_text()) or {}
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as e:
+        raise FlashError(f"{path.name} is not valid YAML: {e}")
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise FlashError(f"{path.name} should be a YAML mapping at the top level")
+    devices = raw.get("devices")
+    if devices is not None and not isinstance(devices, list):
+        raise FlashError(f"{path.name}: 'devices' should be a list")
     return [
         Device(
             mac=normalize_mac(str(d["mac"])),
@@ -106,22 +116,26 @@ def load_registry(path: Path) -> list[Device]:
             friendly_name=str(d["friendly_name"]),
             first_flashed=str(d["first_flashed"]),
         )
-        for d in raw.get("devices") or []
+        for d in devices or []
     ]
 
 
 def save_registry(path: Path, devices: list[Device]) -> None:
     header = (
         "# Registry of every clock flashed from this directory, keyed by the ESP32\n"
-        "# factory MAC address. Maintained by flash.py; it rewrites this file, so\n"
-        "# comments inside the entries do not survive.\n"
+        "# factory MAC address. flash.py appends to this and rewrites it, so keep\n"
+        "# comments out of the entries themselves. MACs are quoted on purpose: an\n"
+        "# all-digit MAC would otherwise parse as a YAML 1.1 sexagesimal integer.\n"
     )
     body = yaml.safe_dump(
         {"devices": [asdict(d) for d in devices]},
         sort_keys=False,
         default_flow_style=False,
     )
-    path.write_text(header + body)
+    try:
+        path.write_text(header + body)
+    except OSError as e:
+        raise FlashError(f"Could not write {path}: {e}")
 
 
 def find_device(devices: list[Device], mac: str) -> Device | None:
@@ -142,19 +156,34 @@ def generate_ota_password() -> str:
 def _secret_keys(path: Path) -> set[str]:
     if not path.exists():
         return set()
-    raw = yaml.safe_load(path.read_text()) or {}
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as e:
+        raise FlashError(f"{path.name} is not valid YAML: {e}")
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise FlashError(f"{path.name} should be a YAML mapping at the top level")
     return set(raw)
 
 
 def append_secrets(path: Path, entries: dict[str, str], comment: str) -> None:
     clash = sorted(set(entries) & _secret_keys(path))
     if clash:
-        raise FlashError(f"{path.name} already has {', '.join(clash)}; refusing to overwrite")
+        raise FlashError(
+            f"{path.name} already has {', '.join(clash)}; refusing to overwrite. "
+            "If a previous run was interrupted, wait for the next minute and run "
+            "again, or delete those lines by hand."
+        )
     text = path.read_text() if path.exists() else ""
     if text and not text.endswith("\n"):
         text += "\n"
+    sep = "\n" if text else ""
     lines = "".join(f"{k}: {json.dumps(v)}\n" for k, v in entries.items())
-    path.write_text(f"{text}\n# {comment}\n{lines}")
+    try:
+        path.write_text(f"{text}{sep}# {comment}\n{lines}")
+    except OSError as e:
+        raise FlashError(f"Could not write {path}: {e}")
 
 
 def missing_secrets(path: Path, names: list[str]) -> list[str]:
@@ -182,7 +211,7 @@ def find_port(explicit: str | None) -> str:
 
 
 def read_mac(port: str) -> str:
-    cmd = [sys.executable, "-m", "esptool", "--port", port, "read-mac"]
+    cmd = [sys.executable, "-m", "esptool", "--chip", "esp32", "--port", port, "read-mac"]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise FlashError(f"esptool failed on {port}:\n{r.stdout}{r.stderr}")
@@ -235,7 +264,10 @@ def resolve_device(
 
     device_file = device_dir / f"{device.name}.yaml"
     if not device_file.exists():
-        device_file.write_text(render_device_yaml(device.name, device.friendly_name))
+        try:
+            device_file.write_text(render_device_yaml(device.name, device.friendly_name))
+        except OSError as e:
+            raise FlashError(f"Could not write {device_file}: {e}")
     return device, is_new
 
 

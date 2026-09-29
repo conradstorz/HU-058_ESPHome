@@ -146,6 +146,28 @@ def test_append_secrets_escapes_quotes_and_backslashes(tmp_path):
     path.write_text("")
     flash.append_secrets(path, {"odd": 'say "hi" \\ bye'}, comment="odd")
     assert yaml.safe_load(path.read_text()) == {"odd": 'say "hi" \\ bye'}
+    assert path.read_text() == '# odd\nodd: "say \\"hi\\" \\\\ bye"\n'
+
+
+def test_missing_secrets_non_mapping_file_errors(tmp_path):
+    path = tmp_path / "secrets.yaml"
+    path.write_text("just a string")
+    with pytest.raises(flash.FlashError, match="mapping"):
+        flash.missing_secrets(path, ["a"])
+
+
+def test_load_registry_malformed_yaml_errors(tmp_path):
+    path = tmp_path / "devices.yaml"
+    path.write_text("devices: [unclosed")
+    with pytest.raises(flash.FlashError, match="not valid YAML"):
+        flash.load_registry(path)
+
+
+def test_load_registry_non_list_devices_errors(tmp_path):
+    path = tmp_path / "devices.yaml"
+    path.write_text("devices: nope")
+    with pytest.raises(flash.FlashError, match="list"):
+        flash.load_registry(path)
 
 
 # --- port discovery ---------------------------------------------------------
@@ -183,7 +205,7 @@ def test_read_mac_runs_esptool(monkeypatch):
     calls = []
 
     def fake_run(cmd, **kw):
-        calls.append(cmd)
+        calls.append((cmd, kw))
         class R:
             returncode = 0
             stdout = "MAC: 20:50:0D:17:F4:58\n"
@@ -192,10 +214,11 @@ def test_read_mac_runs_esptool(monkeypatch):
 
     monkeypatch.setattr(flash.subprocess, "run", fake_run)
     assert flash.read_mac("COM4") == "20:50:0d:17:f4:58"
-    assert calls[0][:2] == [flash.sys.executable, "-m"]
-    assert "esptool" in calls[0]
-    assert "COM4" in calls[0]
-    assert "read-mac" in calls[0]
+    cmd, kw = calls[0]
+    assert cmd == [flash.sys.executable, "-m", "esptool", "--chip", "esp32", "--port", "COM4", "read-mac"]
+    assert "--chip" in cmd
+    assert cmd[cmd.index("--chip") + 1] == "esp32"
+    assert kw == {"capture_output": True, "text": True}
 
 
 def test_read_mac_failure_is_flash_error(monkeypatch):
@@ -208,6 +231,19 @@ def test_read_mac_failure_is_flash_error(monkeypatch):
 
     monkeypatch.setattr(flash.subprocess, "run", fake_run)
     with pytest.raises(flash.FlashError, match="Could not open COM4"):
+        flash.read_mac("COM4")
+
+
+def test_read_mac_rejects_wrong_chip(monkeypatch):
+    def fake_run(cmd, **kw):
+        class R:
+            returncode = 2
+            stdout = ""
+            stderr = "A fatal error occurred: This chip is ESP8266, not ESP32. Wrong chip argument?"
+        return R()
+
+    monkeypatch.setattr(flash.subprocess, "run", fake_run)
+    with pytest.raises(flash.FlashError, match="not ESP32"):
         flash.read_mac("COM4")
 
 
