@@ -13,12 +13,78 @@ cloned from, so the fork is strictly ahead and nothing needs merging down.
 Introduce ourselves with the smallest change that is obviously good at a
 glance, adds functionality every user benefits from, and stands on its own.
 Then build on it in steps small enough that each one is easy to accept.
-The sequence is PR 0 (second clock, zero existing lines touched), PR 1
-(tidy the shape into a base package and per-clock files), PR 2
-(`flash.py`). Each PR is cut from the previous one's branch, so if the
-maintainer merges them in order every diff stays small.
+The sequence is PR 1 (timezone docs, a typo fix and clearer wording), PR 2
+(heartbeat LED, 17 added lines in one file), PR 3 (second clock, zero
+existing lines touched), PR 4 (tidy the shape into a base package and
+per-clock files), PR 5 (`flash.py`). PR 1, PR 2 and PR 3 are all cut from
+`upstream/main` and are independent of each other. PR 4 and PR 5 are each
+cut from the previous one's branch, since they edit files the earlier PR
+creates, so if the maintainer merges them in order every diff stays small.
 
-## PR 0: a second clock without touching `clock.yaml`
+## PR 1: make the timezone rules unmissable
+
+Docs only, independent of every other PR, cut from `upstream/main`. Goes
+first because a typo fix plus clearer wording is the softest possible
+introduction and touches no behavior.
+
+Prompted by a real trip: a freshly flashed clock showed UTC because the
+`secrets.yaml.example` ships `Etc/UTC` and the clock had not been adopted
+yet. The upstream docs do say Home Assistant's timezone wins, but the
+sentence "that path wins, but only while the `homeassistant` time platform
+has no timezone of its own. Do not add one there." reads as a
+contradiction unless you already know that `timezone:` is an optional key
+on that platform and that leaving it out is what enables the push.
+
+What changes:
+
+- `docs/home-assistant.md`: "Home Assitant" typo, and a pointer to the
+  README section.
+- `firmware/esphome/README.md`: replace the two Setup paragraphs with a
+  "Where the timezone comes from" subsection that shows the `time:` block,
+  says plainly that Home Assistant wins once adopted, that `secrets.yaml`
+  only feeds the SNTP fallback, that a clock reading hours off is on the
+  fallback and not yet adopted, and that adding `timezone:` under
+  `platform: homeassistant` disables the push. Notes the Home Assistant
+  2026.3.0 minimum for the push, verified in `api_connection.cpp` under
+  `USE_HOMEASSISTANT_TIMEZONE`.
+- `clock.yaml` (`clock-base.yaml` in the fork): rewrite the two comments on
+  the `time:` platforms to say primary and fallback, and that the missing
+  `timezone:` key is deliberate and is the switch.
+- `secrets.yaml.example`: two comment lines above `timezone` saying it is
+  fallback only.
+
+All four edits are on the fork's `main` as of 2026-09-30. Reapply them by
+hand on the PR branch; the `clock.yaml` comment lands in a different region
+from PR 2's heartbeat block, so the two do not conflict.
+
+## PR 2: heartbeat on the devkit LED
+
+The only change is fork commit `fa1e768`: a `gpio` output on GPIO2 and a
+4s `interval` that turns it on for two seconds and off for two. Seventeen
+added lines in `clock.yaml` (upstream's name for the shared file), nothing
+modified, nothing exposed to Home Assistant.
+
+Why it is the first code change:
+
+- Zero risk to the display. GPIO2 is unused by the panel and the buttons,
+  and the interval runs in the main loop, nowhere near the scan ISR.
+- Every user benefits. The blue LED on the back of the case says the
+  firmware is alive without opening an app, and it is the first thing a
+  new user sees after flashing a bare devkit.
+- Trivially reviewable. Two YAML blocks and a comment; the maintainer can
+  read the whole diff in the PR summary.
+
+Caveat to state in the PR text: GPIO2 is the classic ESP32 devkit LED.
+Other boards put their LED elsewhere or use a WS2812, so the block is a
+no-op there rather than a fault. See
+`automatic-board-detection-roadmap.md`.
+
+Branch: cut `upstream-heartbeat` from `upstream/main`, apply the two
+blocks by hand into `clock.yaml` preserving upstream's CRLF line endings,
+verify with `uv run esphome config clock.yaml`, push to `origin`, open
+with `gh pr create --repo misterblack1/HU-058_ESPHome`.
+
+## PR 3: a second clock without touching `clock.yaml`
 
 The smallest meaningful PR touches zero existing lines. Upstream's
 `clock.yaml` already declares `substitutions` for `name` and
@@ -58,20 +124,22 @@ Trade-offs to state in the PR text:
   `esphome.wifi_clock_<name>` becomes slightly stale for the second clock.
   One-line fix if the maintainer wants it; otherwise leave it.
 
-Branch: cut `upstream-second-clock` from `upstream/main`, add the three
-files by hand, verify with `uv run esphome config clock-2.yaml`, push to
-`origin`, open with `gh pr create --repo misterblack1/HU-058_ESPHome`.
+Branch: cut `upstream-second-clock` from `upstream/main`, not from the
+PR 2 branch. The two PRs touch disjoint files, so they merge in either
+order and neither should carry the other's commit. Add the three files by
+hand, verify with `uv run esphome config clock-2.yaml`, push to `origin`,
+open the PR against upstream.
 
-## PR 1: move the shared config into `clock-base.yaml`
+## PR 4: move the shared config into `clock-base.yaml`
 
-Follows PR 0 and tidies what PR 0 leaves loose. After PR 0, `clock.yaml`
+Follows PR 3 and tidies what PR 3 leaves loose. After PR 3, `clock.yaml`
 is both the first clock's file and the package every other clock
 includes, so it still carries the first clock's name, API key and OTA
 password, and every other clock inherits those unless it overrides them.
-PR 1 makes the shared part a package with no identity in it and turns
+PR 4 makes the shared part a package with no identity in it and turns
 every clock, the first included, into a small device file.
 
-What changes, relative to PR 0:
+What changes, relative to PR 3:
 
 - `clock-base.yaml`: `clock.yaml` moved here, minus the `substitutions:`
   block, the `api:` encryption key and the `ota:` password, plus a header
@@ -83,15 +151,15 @@ What changes, relative to PR 0:
   `ota: password: !secret ota_password_wifi_clock`, and includes
   `clock-base.yaml`. Keeping this filename means `esphome run clock.yaml`
   still works for existing users.
-- `clock-2.yaml` from PR 0: same shape as `clock.yaml`, including
+- `clock-2.yaml` from PR 3: same shape as `clock.yaml`, including
   `clock-base.yaml` and its own two secrets.
 - `secrets.yaml.example`: the two per-clock entries for each device file.
-- `firmware/esphome/README.md`: the PR 0 paragraph updated so the recipe
+- `firmware/esphome/README.md`: the PR 3 paragraph updated so the recipe
   is "copy `clock.yaml`, change the two names and the two secret names".
 - Comments in `docs/wiring.md`, `components/aip33628/__init__.py` and
   `components/aip33628/aip33628.h` that name `clock.yaml` should point at
   `clock-base.yaml` where they describe the shared config. The
-  `esphome.wifi_clock_<name>` comment PR 0 left stale gets fixed here.
+  `esphome.wifi_clock_<name>` comment PR 3 left stale gets fixed here.
 - A troubleshooting bullet in `firmware/esphome/README.md`, next to the
   existing BOOT-button and OTA-rollback notes under "Build and flash",
   for the wrong-board case. esptool's message is
@@ -101,15 +169,15 @@ What changes, relative to PR 0:
   Say that no config change fixes it, the firmware needs a separate
   ESP32, and give the pre-flight check so nobody waits through a compile
   to learn it: `uv run esptool --port COM4 chip-id`. About eight lines,
-  docs only. Could ride with PR 0 instead if PR 1 stalls.
+  docs only. Could ride with PR 3 instead if PR 4 stalls.
 
-Why it earns its place after PR 0:
+Why it earns its place after PR 3:
 
 - Each clock gets its own API key and OTA password, so revoking or
   re-pairing one never touches another.
 - The package has no identity in it, so nothing stale is inherited and no
   overrides are needed.
-- It is the file shape `flash.py` writes, so PR 2 has nothing to reshape.
+- It is the file shape `flash.py` writes, so PR 5 has nothing to reshape.
 - Still no Python. Compiled config for the first clock was verified
   byte-identical to today's in the fork (plan Task 2), and should be
   re-verified on the PR branch.
@@ -125,15 +193,15 @@ Differences from the fork to watch when preparing the branch:
    two device files reference.
 
 Branch: cut `upstream-config-split` from `upstream-second-clock` (or from
-`upstream/main` once PR 0 merges), apply the changes by hand rather than
+`upstream/main` once PR 3 merges), apply the changes by hand rather than
 cherry-picking (the fork commits carry the rename and line-ending churn),
 verify with `uv run esphome config clock.yaml` and `clock-2.yaml`, push to
 `origin`, open the PR against upstream.
 
-## PR 2, later: `flash.py`
+## PR 5, later: `flash.py`
 
-Once PR 1 lands, `flash.py` is a natural follow-up because it only writes
-files in the shape PR 1 defines. It brings port discovery, the MAC
+Once PR 4 lands, `flash.py` is a natural follow-up because it only writes
+files in the shape PR 4 defines. It brings port discovery, the MAC
 registry in `devices.yaml`, per-device secrets, and the ESP32 chip check.
 Offer it with its tests and `pyproject.toml`; leave `uv.lock` out unless
 the maintainer wants it.
@@ -153,7 +221,7 @@ Why it comes last:
 - The chip check catches a real mistake (an ESP8266 on COM4 during Task 6)
   but esptool refuses the wrong image anyway, just with a worse message.
 - The MAC lookup only pays off with the registry, and the registry only
-  makes sense once each clock has its own small device file (PR 1).
+  makes sense once each clock has its own small device file (PR 4).
 - It is 300 lines of Python plus tests and uv landing in a YAML and C++
   repo. The maintainer has to decide whether to own a Python tool before
   judging whether it is a good one, which is the opposite of obvious at a
