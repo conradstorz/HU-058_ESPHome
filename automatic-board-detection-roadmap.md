@@ -16,8 +16,9 @@ another chip is a header and validator inspection, not a flash.
   `send_pair_()` and a `board:` change, and nothing else. That is wrong for
   S2 and S3, and incomplete for all four. See "Per chip" below.
 - `flash.py` hardcodes `--chip esp32` in `read_mac()`, so esptool refuses any
-  other chip before the registry is touched. That is the only true barrier
-  to flashing an S3 today and it is deliberate.
+  other chip before the registry is touched. That is the first barrier on
+  the flashing path, and it is deliberate. The board line and the default
+  pins below are the next two.
 - `clock-base.yaml` pins `board: esp32dev`, GPIO22/21/19/18 for the display,
   GPIO32/33 for the buttons and GPIO2 for the heartbeat LED. All of those are
   classic-ESP32 choices and several are illegal on other chips.

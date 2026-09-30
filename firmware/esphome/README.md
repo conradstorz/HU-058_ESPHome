@@ -97,19 +97,26 @@ wins**, DST rules included. It is pushed to the clock on every time sync, so
 changing the timezone in Home Assistant changes it on the clock. Nothing in
 this repo needs editing for that.
 
-The `timezone` entry in `secrets.yaml` only feeds the `sntp` fallback. It is
-what the clock shows before Home Assistant has adopted it, for the first few
-seconds of every boot until Home Assistant answers, and while Home Assistant
-is unreachable. The example ships `Etc/UTC`, so a clock that reads several
-hours off is on this fallback and has not been adopted yet. Set it to your
-zone anyway so the fallback is useful.
+The `timezone` entry in `secrets.yaml` only feeds the `sntp` fallback, and
+the fallback is a startup value, not a standby. ESPHome keeps one global
+timezone. The `sntp` block sets it from `secrets.yaml` at boot, and the first
+Home Assistant time sync overwrites it. Nothing ever puts the `secrets.yaml`
+value back, so if Home Assistant later drops off the network the clock keeps
+the last timezone it was pushed. The secret is therefore in charge:
+
+- from every power-on until Home Assistant first answers, adopted or not
+- for as long as the clock is never adopted
+- for as long as Home Assistant is older than 2026.3.0, which sends a
+  timezone format current ESPHome no longer decodes
+
+The example ships `Etc/UTC`, so a clock that reads several hours off is on
+this startup value and has not heard from Home Assistant since it booted.
+Set it to your zone anyway so the first seconds of every boot look right.
 
 **Do not add a `timezone:` line under `platform: homeassistant`.** That key is
 optional, and leaving it out is what enables the push. Adding one compiles the
 push out and pins the clock to whatever you wrote, no matter what Home
-Assistant says. The push also needs Home Assistant 2026.3.0 or newer; older
-versions send a format current ESPHome no longer decodes, and the clock stays
-on the fallback timezone without any error.
+Assistant says.
 
 ## Build and flash
 

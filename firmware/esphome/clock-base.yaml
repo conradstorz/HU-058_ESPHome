@@ -172,11 +172,13 @@ time:
   # Assistant, not here.
   - platform: homeassistant
     id: ha_time
-  # Fallback source, used before the clock is adopted, for the first few
-  # seconds of every boot until Home Assistant answers, and while Home
-  # Assistant is unreachable. NTP carries no timezone, so this one has to be
-  # spelled out, and `timezone` in secrets.yaml is the only place it lives.
-  # It has no effect once Home Assistant is connected.
+  # Fallback source. NTP carries no timezone, so this one is spelled out,
+  # and `timezone` in secrets.yaml is the only place it lives. ESPHome keeps
+  # a single global timezone: this block sets it at boot and the first Home
+  # Assistant sync overwrites it for good. So this value is what the clock
+  # shows from every power-on until Home Assistant first answers, and
+  # forever if it never does. A later Home Assistant disconnect does not
+  # bring it back; the pushed timezone stays while SNTP keeps the time.
   - platform: sntp
     id: sntp_time
     timezone: !secret timezone
