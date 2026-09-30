@@ -271,6 +271,7 @@ button:
   # the api actions above.
   - platform: template
     name: Show Seconds
+    internal: true
     on_press:
       - lambda: id(panel)->show_seconds(5000);
 
@@ -278,6 +279,7 @@ button:
   # digits driven independently.
   - platform: template
     name: Digit Color Demo
+    internal: true
     on_press:
       - lambda: |-
           id(panel)->set_digit_color(0, 1.00f, 0.00f, 0.00f);
@@ -287,6 +289,7 @@ button:
 
   - platform: template
     name: Clear Digit Colors
+    internal: true
     on_press:
       - lambda: id(panel)->clear_digit_colors();
 
@@ -294,6 +297,7 @@ button:
   # is the sort of thing the stock firmware did. -45 degrees is that diagonal.
   - platform: template
     name: Diagonal Gradient
+    internal: true
     on_press:
       - lambda: |-
           id(panel)->set_gradient(0.00f, 1.00f, 0.10f,
@@ -336,6 +340,7 @@ select:
 
   - platform: template
     name: Test Unit
+    internal: true
     id: test_unit
     optimistic: true
     restore_value: true
@@ -418,6 +423,7 @@ number:
 
   - platform: template
     name: Test Number
+    internal: true
     id: test_number
     optimistic: true
     restore_value: true
