@@ -79,12 +79,37 @@ below is run through `uv run` so nothing needs activating.
 Fill in the WiFi credentials and the timezone. Leave the per-device entries
 alone, `flash.py` writes those.
 
-The timezone in `secrets.yaml` is a fallback for a boot with no Home Assistant.
-Change it to yours.
+### Where the timezone comes from
 
-Home Assistant pushes its own timezone on every time sync and that path wins,
-but only while the `homeassistant` time platform has no timezone of its own.
-Do not add one there.
+The clock has two time sources, both in the `time:` block of `clock-base.yaml`:
+
+```yaml
+time:
+  - platform: homeassistant   # primary: time and timezone from Home Assistant
+    id: ha_time
+  - platform: sntp            # fallback: NTP time, timezone from secrets.yaml
+    id: sntp_time
+    timezone: !secret timezone
+```
+
+Once the clock is adopted in Home Assistant, **Home Assistant's own timezone
+wins**, DST rules included. It is pushed to the clock on every time sync, so
+changing the timezone in Home Assistant changes it on the clock. Nothing in
+this repo needs editing for that.
+
+The `timezone` entry in `secrets.yaml` only feeds the `sntp` fallback. It is
+what the clock shows before Home Assistant has adopted it, for the first few
+seconds of every boot until Home Assistant answers, and while Home Assistant
+is unreachable. The example ships `Etc/UTC`, so a clock that reads several
+hours off is on this fallback and has not been adopted yet. Set it to your
+zone anyway so the fallback is useful.
+
+**Do not add a `timezone:` line under `platform: homeassistant`.** That key is
+optional, and leaving it out is what enables the push. Adding one compiles the
+push out and pins the clock to whatever you wrote, no matter what Home
+Assistant says. The push also needs Home Assistant 2026.3.0 or newer; older
+versions send a format current ESPHome no longer decodes, and the clock stays
+on the fallback timezone without any error.
 
 ## Build and flash
 
