@@ -136,6 +136,10 @@ same to `sendFrame()` in `firmware/esp32/panel-test/src/main.cpp`.
 
 ## Roadmap
 
+Stages 3 and 4 are the board-recognition half of the easy-flash system
+described under "What comes next" in `upstream-ideas.md`. They are planned
+to land together with the multi-clock work rather than one at a time.
+
 ### Stage 1: correct the docs
 
 - Split the README's "S2, S3, C3 and C6" section into "S2 and S3, config

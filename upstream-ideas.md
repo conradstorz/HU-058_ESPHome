@@ -5,8 +5,56 @@ Notes on what to offer back to the original project,
 This fork is `conradstorz/HU-058_ESPHome`; the local remotes are `origin`
 (fork) and `upstream` (original).
 
-As of 2026-09-29 upstream is still at `10b2d64`, the commit this fork was
+As of 2026-09-30 upstream is still at `10b2d64`, the commit this fork was
 cloned from, so the fork is strictly ahead and nothing needs merging down.
+
+## Status
+
+| PR | Upstream | Branch on `origin` | Opened | State |
+| --- | --- | --- | --- | --- |
+| 1, timezone docs | [#7](https://github.com/misterblack1/HU-058_ESPHome/pull/7) | `upstream-timezone-docs` | 2026-09-30 | open, waiting |
+| 2, heartbeat LED | [#8](https://github.com/misterblack1/HU-058_ESPHome/pull/8) | `upstream-heartbeat` | 2026-09-30 | open, waiting |
+| 3, second clock | not opened | `upstream-second-clock`, pushed, one commit `5ea4927` | | on hold |
+| 4, config split | not opened | | | on hold |
+| 5, `flash.py` | not opened | | | on hold, see "What comes next" |
+
+Both open PRs were cut from `upstream/main` at `10b2d64`, validated with
+`esphome config clock.yaml` on ESPHome 2026.9.0 against a `secrets.yaml`
+built from upstream's example, and end with the line "Created for Conrad
+Storz with the help of Claude Code (conradstorz@gmail.com)". Nothing else
+goes upstream until the maintainer accepts, rejects, or clearly ignores
+these two. Check with:
+
+```
+gh pr list --repo misterblack1/HU-058_ESPHome --author conradstorz --state all
+```
+
+Three possible outcomes and what each means for the rest of this file:
+
+- **Accepted.** Continue with PR 3 as written, then 4 and 5, each cut from
+  the merged `upstream/main`.
+- **Rejected or changes requested.** Read the reasons before touching
+  PR 3; the objection may apply to the whole sequence.
+- **Ignored for a month or more.** Stop offering small steps. Build the
+  easy-flash system on the fork instead and, if anything goes upstream
+  later, offer it as one self-contained PR.
+
+Lessons from opening the first two, for whoever prepares the next one:
+
+- Upstream's line endings are not uniformly CRLF. `README.md` and
+  `docs/home-assistant.md` are LF. `clock.yaml` and
+  `secrets.yaml.example` are mixed, mostly CRLF with a few LF lines. Match
+  the ending of the neighbouring lines and check with `git ls-files --eol`.
+  The fork's `core.autocrlf=input` does not normalise a file whose index
+  blob already contains CRLF, so a careful edit commits without churn.
+- The fork's `secrets.yaml` uses per-clock secret names, so validating an
+  upstream-shaped `clock.yaml` needs a throwaway `secrets.yaml` made from
+  `secrets.yaml.example` with a real base64 key pasted in. Delete it and
+  the `.esphome/` build directory before committing.
+- Work in a `git worktree` under the session scratchpad cut from
+  `upstream/main`, never on the fork's `main`. Remove it after the push.
+- Open with `gh pr create --repo misterblack1/HU-058_ESPHome --base main
+  --head conradstorz:<branch>`.
 
 ## Goal
 
@@ -23,9 +71,9 @@ creates, so if the maintainer merges them in order every diff stays small.
 
 ## PR 1: make the timezone rules unmissable
 
-Docs only, independent of every other PR, cut from `upstream/main`. Goes
-first because a typo fix plus clearer wording is the softest possible
-introduction and touches no behavior.
+Opened 2026-09-30 as upstream #7. Docs only, independent of every other
+PR, cut from `upstream/main`. Went first because a typo fix plus clearer
+wording is the softest possible introduction and touches no behavior.
 
 Prompted by a real trip: a freshly flashed clock showed UTC because the
 `secrets.yaml.example` ships `Etc/UTC` and the clock had not been adopted
@@ -53,16 +101,21 @@ What changes:
 - `secrets.yaml.example`: two comment lines above `timezone` saying it is
   fallback only.
 
-All four edits are on the fork's `main` as of 2026-09-30. Reapply them by
-hand on the PR branch; the `clock.yaml` comment lands in a different region
-from PR 2's heartbeat block, so the two do not conflict.
+All four edits are on the fork's `main` and, as of 2026-09-30, on the
+`upstream-timezone-docs` branch as one commit. The `clock.yaml` comment
+lands in a different region from PR 2's heartbeat block, so the two do
+not conflict. The PR text also flags the one claim worth a reviewer's eye:
+ESPHome's single global timezone means a Home Assistant disconnect does
+not bring the `secrets.yaml` value back, which is why the docs call it a
+startup value rather than a standby.
 
 ## PR 2: heartbeat on the devkit LED
 
-The only change is fork commit `fa1e768`: a `gpio` output on GPIO2 and a
-4s `interval` that turns it on for two seconds and off for two. Seventeen
-added lines in `clock.yaml` (upstream's name for the shared file), nothing
-modified, nothing exposed to Home Assistant.
+Opened 2026-09-30 as upstream #8. The only change is fork commit
+`fa1e768`: a `gpio` output on GPIO2 and a 4s `interval` that turns it on
+for two seconds and off for two. Seventeen added lines in `clock.yaml`
+(upstream's name for the shared file), inserted just above `switch:`,
+nothing modified, nothing exposed to Home Assistant.
 
 Why it is the first code change:
 
@@ -74,15 +127,15 @@ Why it is the first code change:
 - Trivially reviewable. Two YAML blocks and a comment; the maintainer can
   read the whole diff in the PR summary.
 
-Caveat to state in the PR text: GPIO2 is the classic ESP32 devkit LED.
+Caveats stated in the PR text: GPIO2 is the classic ESP32 devkit LED.
 Other boards put their LED elsewhere or use a WS2812, so the block is a
 no-op there rather than a fault. See
-`automatic-board-detection-roadmap.md`.
-
-Branch: cut `upstream-heartbeat` from `upstream/main`, apply the two
-blocks by hand into `clock.yaml` preserving upstream's CRLF line endings,
-verify with `uv run esphome config clock.yaml`, push to `origin`, open
-with `gh pr create --repo misterblack1/HU-058_ESPHome`.
+`automatic-board-detection-roadmap.md`. GPIO2 is also a strapping pin, so
+`esphome config` prints ESPHome's standard strapping-pin warning; the PR
+deliberately leaves it visible and mentions `ignore_strapping_warning:
+true` as the maintainer's option. That was a conscious choice: the block
+stays at 17 lines and the maintainer decides how noisy config output
+should be.
 
 ## PR 3: a second clock without touching `clock.yaml`
 
@@ -226,6 +279,28 @@ Why it comes last:
   repo. The maintainer has to decide whether to own a Python tool before
   judging whether it is a good one, which is the opposite of obvious at a
   glance.
+
+## What comes next: the easy-flash system
+
+The plan, as of 2026-09-30, is to return to this project after the two
+PRs have had time to be answered and combine PR 3, PR 4, PR 5 and stages
+3 and 4 of `automatic-board-detection-roadmap.md` into one comprehensive
+"easy flash" system on the fork. The target experience:
+
+- Plug in any supported ESP32 board, run one command, done.
+- The tool recognises the board by chip type (esptool `--chip auto`) and
+  by MAC (the `devices.yaml` registry), so a board it has seen before
+  gets its name, secrets and Home Assistant pairing back, and a new board
+  gets a fresh identity and the right per-chip config package.
+- Any number of clocks on one Home Assistant, each its own ESPHome node
+  with its own API key and OTA password, managed from one directory.
+
+Whether that goes upstream at all depends on the outcome of #7 and #8
+(see "Status"). If it does, it goes as one self-contained PR with its
+tests, and PR 3 and PR 4 below become the description of its file shape
+rather than separate steps. The per-PR notes below are kept because they
+still describe the smallest reviewable pieces if the maintainer prefers
+steps.
 
 ## Not for upstream
 
