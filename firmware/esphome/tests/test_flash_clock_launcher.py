@@ -75,3 +75,56 @@ def test_empty_answer_is_refused_unless_there_is_a_default(launcher):
     values = launcher.prompt_values(ask=lambda _: next(answers), out=lambda *_: None)
     assert values["wifi_ssid"] == "MyNet"
     assert values["timezone"] == "Etc/UTC"
+
+
+def test_credential_whitespace_is_taken_as_typed(launcher):
+    """A WPA passphrase may begin or end with a space, so nothing is trimmed.
+
+    Only a completely empty answer counts as not given, which is why the
+    bare-space answers below are kept rather than triggering the default.
+    """
+    answers = iter(["  Guest Net ", " pad ", " ", "   ", ""])
+    values = launcher.prompt_values(ask=lambda _: next(answers), out=lambda *_: None)
+    assert values == {
+        "wifi_ssid": "  Guest Net ",
+        "wifi_password": " pad ",
+        "ap_password": " ",
+        "timezone": "   ",
+    }
+    assert yaml.safe_load(launcher.render_secrets(values)) == values
+
+
+def test_review_listing_quotes_values_so_stray_spaces_show(launcher):
+    answers = iter(["net", " pad ", "ap", "", ""])
+    shown: list[str] = []
+    launcher.prompt_values(ask=lambda _: next(answers), out=shown.append)
+    assert any('2. WiFi password: " pad "' in line for line in shown), shown
+
+
+def test_a_failed_write_is_reported_not_raised_raw(launcher, tmp_path, monkeypatch):
+    """A full disk after the exclusive create must not reach the user as a
+    traceback, and must not leave the half-written file behind."""
+    path = tmp_path / "secrets.yaml"
+    real_open = open
+
+    def failing_open(*args, **kwargs):
+        handle = real_open(*args, **kwargs)
+
+        class Failing:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                handle.close()
+                return False
+
+            def write(self, text):
+                handle.write(text[:20])
+                raise OSError(28, "No space left on device")
+
+        return Failing()
+
+    monkeypatch.setitem(launcher.__builtins__, "open", failing_open)
+    with pytest.raises(launcher.LauncherError, match="Could not write"):
+        launcher.write_secrets(path, AWKWARD)
+    assert not path.exists()

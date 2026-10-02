@@ -110,10 +110,17 @@ def render_secrets(values: dict[str, str]) -> str:
 
 
 def _ask_one(ask, prompt: str, default: str, out=print) -> str:
+    """Ask for one value, taking it exactly as typed.
+
+    No strip(). A WPA passphrase is any 8 to 63 characters and an SSID is any
+    32 bytes, leading and trailing spaces included, so trimming would quietly
+    write a credential that cannot join the network. Only a completely empty
+    answer counts as "not given", which is what takes the default.
+    """
     label = f"  {prompt} [{default}]: " if default else f"  {prompt}: "
     while True:
-        value = ask(label).strip()
-        if value:
+        value = ask(label)
+        if value != "":
             return value
         if default:
             return default
@@ -130,7 +137,10 @@ def prompt_values(ask=input, out=print) -> dict[str, str]:
     while True:
         out("")
         for i, (key, prompt, _default) in enumerate(SHARED_SECRETS, start=1):
-            out(f"  {i}. {prompt}: {values[key]}")
+            # Quoted, exactly as the file will hold it. Values are taken as
+            # typed, so a stray leading or trailing space has to be visible
+            # here or the review pass cannot catch it.
+            out(f"  {i}. {prompt}: {json.dumps(values[key])}")
         out("")
         # Plain input(), not getpass: this review pass exists so a mistyped
         # WiFi password is caught here rather than after a flash, and the file
@@ -168,11 +178,16 @@ def write_secrets(path: Path, values: dict[str, str]) -> None:
     try:
         with f:
             f.write(text)
-    except BaseException:
+    except BaseException as e:
         try:
             path.unlink()
         except OSError:
             pass
+        # A failed write is still something the user has to fix, so it goes
+        # out as a LauncherError and a one line message rather than a
+        # traceback. An interrupt keeps propagating; main() reports that one.
+        if isinstance(e, OSError):
+            raise LauncherError(f"Could not write {path}: {e}") from e
         raise
 
 
