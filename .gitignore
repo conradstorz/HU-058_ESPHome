@@ -1,0 +1,2 @@
+# Python bytecode. flash-clock.py gets one here when the tests load it by path.
+__pycache__/

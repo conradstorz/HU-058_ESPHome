@@ -95,7 +95,30 @@ Assistant:
   MAC address over USB and gives a new board its own name, API key and OTA
   password; a board it has seen before gets the same identity back, so
   reflashing never disturbs its Home Assistant pairing. Details in
-  `firmware/esphome/README.md`.
+  `firmware/esphome/README.md`, and `flash-clock.py` below runs it for you.
+
+### Flashing a clock
+
+With the ESP32 on USB, from this directory:
+
+```
+python flash-clock.py
+```
+
+`flash-clock.py` is a launcher around `firmware/esphome/flash.py`, which is
+the tool that does the work and owns the clock's identity. The launcher moves
+to that directory for you, offers to create a `secrets.yaml` if there is none,
+and syncs the toolchain first. It is stdlib only and has no options of its
+own, so it runs on any OS with Python 3.12 or newer and everything you give it
+goes through to `flash.py`:
+
+```
+python flash-clock.py --port COM7
+python flash-clock.py --no-logs
+```
+
+On Windows run it from PowerShell or cmd. It refuses to run under Git Bash,
+which builds this firmware with no error and no output.
 
 `firmware/esp32/panel-test/` is a bare-metal PlatformIO project that drives
 the same panel with nothing but the Arduino core. It is the better starting
