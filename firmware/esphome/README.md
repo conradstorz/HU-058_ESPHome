@@ -138,6 +138,11 @@ That is how several clocks live side by side: each one is a separate ESPHome
 node with its own secrets, all built from `clock-base.yaml`. The first clock
 ever built, `wifi-clock`, predates the registry and was entered by hand.
 
+Those minted `clock-YYYYMMDD-HHMM.yaml` files are gitignored. They hold no
+information that `devices.yaml` does not, and `flash.py` writes a missing one
+again the next time that clock is on USB, so the registry is the thing to keep
+committed. `clock-base.yaml` and `wifi-clock.yaml` are tracked.
+
 It checks the chip before it writes anything. A board that is not an ESP32
 (the kit's own ESP8266, say) is refused with esptool's "This chip is ESP8266,
 not ESP32" message and nothing is registered.

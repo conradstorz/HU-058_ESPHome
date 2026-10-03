@@ -24,6 +24,7 @@ This repo reverse-engineers the HU-058D / HU-058 clock panel and provides firmwa
 - This project is intentionally hardware-focused; verify both software and wiring changes against the physical panel behavior.
 - Keep secrets out of version control. Use `secrets.yaml` in the ESPHome firmware directory and avoid committing credentials or personal data. `flash.py` appends per-device `api_key_<name>` / `ota_password_<name>` entries there; never regenerate them for a clock that is already paired with Home Assistant.
 - Shared ESPHome config lives in `clock-base.yaml`. Each clock has a small `<name>.yaml` device file that pulls it in as a package, and `devices.yaml` maps ESP32 MAC addresses to those names. The first clock, `wifi-clock`, is already in Home Assistant and must keep its name and secrets.
+- The minted `clock-YYYYMMDD-HHMM.yaml` device files are gitignored; `flash.py` rewrites a missing one from `devices.yaml`. Commit the registry, not the device file. `clock-base.yaml` and `wifi-clock.yaml` are tracked.
 
 ## Build and validation commands
 

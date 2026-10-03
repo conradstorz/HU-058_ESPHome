@@ -2,6 +2,13 @@
 /.esphome/
 /secrets.yaml
 
+# Device files flash.py mints, one per clock. devices.yaml is the record that
+# matters, and flash.py rewrites a missing <name>.yaml from it the next time
+# that clock is on USB. The range keeps clock-base.yaml, which is shared
+# config and is tracked. wifi-clock.yaml is tracked too: it is the worked
+# example the docs validate against.
+/clock-[0-9]*.yaml
+
 # Python
 /.venv/
 /venv/
