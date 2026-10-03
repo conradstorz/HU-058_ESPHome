@@ -138,10 +138,18 @@ That is how several clocks live side by side: each one is a separate ESPHome
 node with its own secrets, all built from `clock-base.yaml`. The first clock
 ever built, `wifi-clock`, predates the registry and was entered by hand.
 
-Those minted `clock-YYYYMMDD-HHMM.yaml` files are gitignored. They hold no
-information that `devices.yaml` does not, and `flash.py` writes a missing one
-again the next time that clock is on USB, so the registry is the thing to keep
-committed. `clock-base.yaml` and `wifi-clock.yaml` are tracked.
+`devices.yaml` and those minted `clock-YYYYMMDD-HHMM.yaml` files are both
+gitignored. They are a record of the boards on this workstation, MAC addresses
+included, and they describe nothing about the project itself, so they stay out
+of the repo. `devices.yaml.example` shows what the registry holds; there is
+nothing to copy, because `flash.py` creates the real one, header and all, the
+first time it sees a clock. `clock-base.yaml` and `wifi-clock.yaml` are
+tracked.
+
+Back the two of them up with `secrets.yaml`, though, and keep all three
+together. The registry is what stops `flash.py` minting a second identity for
+a clock Home Assistant has already paired, and the secrets are the keys that
+pairing uses. Lose the pair and every clock has to be re-added by hand.
 
 It checks the chip before it writes anything. A board that is not an ESP32
 (the kit's own ESP8266, say) is refused with esptool's "This chip is ESP8266,
