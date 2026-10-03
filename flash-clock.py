@@ -2,9 +2,10 @@
 """Launcher: flash an HU-058 clock from the repository root.
 
 Does what the firmware README tells you to do by hand, so you do not have to
-remember the subdirectory. Checks the shell and the toolchain, makes sure
-there is a secrets.yaml, then hands off to firmware/esphome/flash.py, which
-owns every decision about the clock's identity.
+remember the subdirectory. Checks the toolchain, checks the shell can build,
+makes sure there is a secrets.yaml, then hands off to
+firmware/esphome/flash.py, which owns every decision about the clock's
+identity.
 
 Stdlib only, so it runs on any machine with Python 3.12 or newer. Everything
 after the launcher's own flags goes straight through:
@@ -59,11 +60,14 @@ class LauncherError(Exception):
 # --- preflight --------------------------------------------------------------
 
 def check_shell() -> None:
-    """Refuse to run under Git Bash / MSYS on Windows.
+    """Refuse to build under Git Bash / MSYS on Windows.
 
     The firmware README records the failure: that shell compiles with no error
     and produces no build output, so the upload fails afterwards with nothing
     to explain why. Better to stop here than to burn a flash on it.
+
+    Only the build is affected, so main() skips this for the runs that do not
+    compile anything: --help, and --register-only.
     """
     if sys.platform == "win32" and os.environ.get("MSYSTEM"):
         raise LauncherError(
@@ -72,6 +76,17 @@ def check_shell() -> None:
             "Run this from PowerShell or cmd instead:\n"
             "    python flash-clock.py"
         )
+
+
+def is_register_only(arg: str) -> bool:
+    """True for --register-only and for any prefix argparse accepts for it.
+
+    flash.py takes the flag through argparse, which honours unambiguous
+    abbreviations, so --reg and --r reach it as --register-only too. This has
+    to agree with that or the shell check would fire on a run that never
+    compiles.
+    """
+    return len(arg) > 2 and "--register-only".startswith(arg)
 
 
 def find_uv() -> str:
@@ -230,9 +245,13 @@ def run(uv: str, args: list[str], sync: bool = True) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     wants_help = bool(args) and args[0] in {"-h", "--help"}
+    # Printing flags and registering a clock both work in any shell. Only the
+    # compile is broken under Git Bash, so only that run is refused.
+    will_build = not wants_help and not any(is_register_only(a) for a in args)
 
     try:
-        check_shell()
+        if will_build:
+            check_shell()
         check_layout()
         uv = find_uv()
         if wants_help:

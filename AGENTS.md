@@ -37,7 +37,7 @@ uv run flash.py          # register (if new) and flash the clock on USB
 uv run esphome config wifi-clock.yaml   # validate one device file
 ```
 
-Use `uv` only; do not create or activate a venv or `pip install`. On Windows run from PowerShell or cmd (Git Bash has produced empty builds) and use `copy` instead of `cp`. `flash.py` refuses anything that is not an ESP32 before writing any files.
+Use `uv` only; do not create or activate a venv or `pip install`. On Windows run from PowerShell or cmd (Git Bash produces empty builds, and both flash scripts refuse to build there) and use `copy` instead of `cp`. `flash.py` refuses anything that is not an ESP32 before writing any files.
 
 From [firmware/esp32/panel-test/](firmware/esp32/panel-test/):
 

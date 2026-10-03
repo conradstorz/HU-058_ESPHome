@@ -128,3 +128,49 @@ def test_a_failed_write_is_reported_not_raised_raw(launcher, tmp_path, monkeypat
     with pytest.raises(launcher.LauncherError, match="Could not write"):
         launcher.write_secrets(path, AWKWARD)
     assert not path.exists()
+
+
+# --- the Git Bash guard -----------------------------------------------------
+
+# Only the ESP-IDF compile is broken in that shell, so only a run that
+# compiles is refused. flash.py takes --register-only through argparse, which
+# accepts abbreviations, and this launcher has to recognise the same spellings
+# or it would refuse a run that never builds.
+
+@pytest.mark.parametrize("arg", ["--register-only", "--register", "--reg", "--r"])
+def test_register_only_is_recognised_however_it_is_abbreviated(launcher, arg):
+    assert launcher.is_register_only(arg)
+
+
+@pytest.mark.parametrize("arg", ["--port", "--no-logs", "--", "-r", "COM7"])
+def test_other_arguments_are_not_register_only(launcher, arg):
+    assert not launcher.is_register_only(arg)
+
+
+@pytest.fixture
+def no_handoff(launcher, monkeypatch):
+    """Stop main() after the preflight, and record whether it got there."""
+    monkeypatch.setattr(launcher.sys, "platform", "win32")
+    monkeypatch.setenv("MSYSTEM", "MINGW64")
+    monkeypatch.setattr(launcher, "check_layout", lambda: None)
+    monkeypatch.setattr(launcher, "find_uv", lambda: "uv")
+    monkeypatch.setattr(launcher, "ensure_secrets", lambda: None)
+    reached = []
+    monkeypatch.setattr(launcher, "run", lambda uv, args, sync=True: reached.append(args) or 0)
+    return reached
+
+
+def test_a_build_is_refused_under_git_bash(launcher, no_handoff, capsys):
+    assert launcher.main(["--no-logs"]) == 1
+    assert "PowerShell" in capsys.readouterr().err
+    assert no_handoff == []
+
+
+def test_register_only_is_allowed_under_git_bash(launcher, no_handoff):
+    assert launcher.main(["--register-only"]) == 0
+    assert no_handoff == [["--register-only"]]
+
+
+def test_help_is_allowed_under_git_bash(launcher, no_handoff, capsys):
+    assert launcher.main(["--help"]) == 0
+    assert no_handoff == [["--help"]]
