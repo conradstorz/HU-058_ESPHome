@@ -247,6 +247,49 @@ def _now() -> datetime:
     return datetime.now()
 
 
+# --- build cache ------------------------------------------------------------
+
+def find_ccache_dir() -> Path | None:
+    """The directory holding the ccache that ESPHome's ESP-IDF install shipped.
+
+    ESPHome puts ccache on the build PATH (step 5 of
+    esphome.espidf.framework.get_framework_env) but decides whether to enable it
+    at step 6, with shutil.which() against this process's PATH. A ccache it
+    installed itself is invisible to its own probe, so every build gets
+    IDF_CCACHE_ENABLE=0 and recompiles the framework from scratch. Putting the
+    directory on our PATH lets the probe find it, which is what switches on
+    CCACHE_BASEDIR and lets two clocks with identical source share objects.
+
+    ESPHome is asked where its tools live rather than that path being rebuilt
+    here, so an ESPHOME_ESP_IDF_PREFIX override cannot send the build one way
+    and this lookup another. It is the same call the build makes, which strips
+    whitespace, expands ~, resolves symlinks, and reads a blank override as
+    unset.
+    """
+    from esphome.build_helpers.tools_cache import IDF_TOOLS_CACHE, tools_cache_path
+
+    tools = tools_cache_path(*IDF_TOOLS_CACHE) / "tools" / "ccache"
+    found = list(tools.glob("*/*/ccache.exe")) + list(tools.glob("*/*/ccache"))
+    # Newest by mtime, not by name: the directories are version numbers, and
+    # sorting those as strings puts 4.9 after 4.12.1.
+    return max(found, key=lambda f: f.stat().st_mtime).parent if found else None
+
+
+def build_env() -> dict[str, str]:
+    """os.environ with ccache reachable, for the esphome subprocess."""
+    env = dict(os.environ)
+    ccache_dir = find_ccache_dir()
+    if ccache_dir is None:
+        return env
+    env["PATH"] = f"{ccache_dir}{os.pathsep}{env.get('PATH', '')}"
+    # The 5 GiB default evicts by LRU, and one ESP-IDF object tree is big enough
+    # that a quiet eviction would put the full rebuild back. This is a
+    # per-invocation value, not stored config: a build started outside flash.py
+    # still gets the default.
+    env.setdefault("CCACHE_MAXSIZE", "20G")
+    return env
+
+
 # --- resolution -------------------------------------------------------------
 
 def resolve_device(
@@ -329,7 +372,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cmd = [sys.executable, "-m", "esphome", "run", f"{device.name}.yaml", "--device", port, *extra]
-    return subprocess.call(cmd, cwd=HERE)
+    return subprocess.call(cmd, cwd=HERE, env=build_env())
 
 
 if __name__ == "__main__":

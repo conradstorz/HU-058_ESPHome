@@ -168,6 +168,17 @@ compiles with no error and produces no build output, so the upload then fails;
 `flash.py` refuses to build there rather than let it get that far.
 `--register-only` compiles nothing and still works in any shell.
 
+Each clock is its own ESPHome node, so a new MAC gets a new build directory and
+would recompile the whole ESP-IDF framework. `flash.py` puts ccache on the
+build's PATH to stop that. ESPHome installs ccache alongside the ESP-IDF tools
+and already sets `CCACHE_BASEDIR`, so two nodes built from the same source share
+compiled objects; it just looks for the binary on the calling shell's PATH,
+where its own install is not, and so disables the cache it shipped. Measured
+here, a second clock from a cold configure took 104 s instead of 400 s, with
+1083 of 1089 compiles served from the cache. The six misses are the files that
+genuinely differ per clock. The cache sits with the ESP-IDF tools and
+`uv run esphome clean-all` removes it.
+
 Once it is on the network, updates go over the air, and the API carries the
 log stream. Use the clock's own device file:
 
