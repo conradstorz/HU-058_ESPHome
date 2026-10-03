@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -393,6 +394,83 @@ def test_check_shell_ignores_msystem_off_windows(monkeypatch):
     monkeypatch.setattr(flash.sys, "platform", "linux")
     monkeypatch.setenv("MSYSTEM", "MINGW64")
     flash.check_shell()
+
+
+# --- the build cache --------------------------------------------------------
+
+# ESPHome installs ccache with the ESP-IDF tools but resolves whether to use it
+# against this process's PATH, not the build's, so its own ccache is invisible
+# to its own probe and every new MAC recompiles the framework from scratch.
+# Putting the directory on the PATH we hand the subprocess is what turns it on.
+
+def _fake_ccache_install(root: Path, version: str, mtime: float) -> Path:
+    exe = root / "tools" / "ccache" / version / f"ccache-{version}-windows-x86_64" / "ccache.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    os.utime(exe, (mtime, mtime))
+    return exe.parent
+
+
+def test_find_ccache_dir_picks_the_newest_install(tmp_path, monkeypatch):
+    monkeypatch.setenv("ESPHOME_ESP_IDF_PREFIX", str(tmp_path))
+    old = _fake_ccache_install(tmp_path, "4.9", mtime=1_000_000)
+    new = _fake_ccache_install(tmp_path, "4.12.1", mtime=2_000_000)
+
+    # By name "4.9" sorts after "4.12.1"; by mtime the newer install wins.
+    assert sorted([old.parent.name, new.parent.name])[-1] == "4.9"
+    assert flash.find_ccache_dir() == new
+
+
+def test_find_ccache_dir_without_an_install_is_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("ESPHOME_ESP_IDF_PREFIX", str(tmp_path))
+    assert flash.find_ccache_dir() is None
+
+
+def test_build_env_puts_ccache_first_on_the_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("ESPHOME_ESP_IDF_PREFIX", str(tmp_path))
+    monkeypatch.delenv("CCACHE_MAXSIZE", raising=False)
+    ccache_dir = _fake_ccache_install(tmp_path, "4.12.1", mtime=2_000_000)
+
+    env = flash.build_env()
+
+    assert env["PATH"].split(os.pathsep)[0] == str(ccache_dir)
+    assert env["CCACHE_MAXSIZE"] == "20G"
+
+
+def test_build_env_keeps_a_maxsize_the_user_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("ESPHOME_ESP_IDF_PREFIX", str(tmp_path))
+    monkeypatch.setenv("CCACHE_MAXSIZE", "2G")
+    _fake_ccache_install(tmp_path, "4.12.1", mtime=2_000_000)
+
+    assert flash.build_env()["CCACHE_MAXSIZE"] == "2G"
+
+
+def test_build_env_without_ccache_is_the_plain_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("ESPHOME_ESP_IDF_PREFIX", str(tmp_path))
+    monkeypatch.delenv("CCACHE_MAXSIZE", raising=False)
+
+    env = flash.build_env()
+
+    assert env == dict(os.environ)
+    assert "CCACHE_MAXSIZE" not in env
+
+
+def test_main_hands_the_build_env_to_esphome(tmp_path, monkeypatch):
+    monkeypatch.delenv("MSYSTEM", raising=False)  # not Git Bash
+    reg, sec = _layout(tmp_path)
+    flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+    monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(flash, "SECRETS_PATH", sec)
+    monkeypatch.setattr(flash, "HERE", tmp_path)
+    monkeypatch.setattr(flash, "find_port", lambda explicit: "COM4")
+    monkeypatch.setattr(flash, "read_mac", lambda port: "aa:bb:cc:dd:ee:ff")
+    monkeypatch.setattr(flash, "build_env", lambda: {"PATH": "sentinel"})
+    calls = []
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: calls.append(kw) or 0)
+
+    flash.main([])
+
+    assert calls[0]["env"] == {"PATH": "sentinel"}
 
 
 # --- the example registry ---------------------------------------------------
