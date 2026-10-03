@@ -405,7 +405,7 @@ def test_check_shell_ignores_msystem_off_windows(monkeypatch):
 
 def _fake_ccache_install(root: Path, version: str, mtime: float) -> Path:
     exe = root / "tools" / "ccache" / version / f"ccache-{version}-windows-x86_64" / "ccache.exe"
-    exe.parent.mkdir(parents=True)
+    exe.parent.mkdir(parents=True, exist_ok=True)
     exe.write_text("")
     os.utime(exe, (mtime, mtime))
     return exe.parent
@@ -418,12 +418,47 @@ def test_find_ccache_dir_picks_the_newest_install(tmp_path, monkeypatch):
 
     # By name "4.9" sorts after "4.12.1"; by mtime the newer install wins.
     assert sorted([old.parent.name, new.parent.name])[-1] == "4.9"
-    assert flash.find_ccache_dir() == new
+    assert flash.find_ccache_dir() == new.resolve()
 
 
 def test_find_ccache_dir_without_an_install_is_none(tmp_path, monkeypatch):
     monkeypatch.setenv("ESPHOME_ESP_IDF_PREFIX", str(tmp_path))
     assert flash.find_ccache_dir() is None
+
+
+# The prefix override is ESPHome's, and ESPHome normalizes it before using it.
+# Resolving it here by hand would let the build install ccache in one place and
+# this lookup go searching in another, which silently costs the whole cache.
+
+def test_find_ccache_dir_expands_a_tilde_prefix(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("ESPHOME_ESP_IDF_PREFIX", "~/idf")
+    ccache_dir = _fake_ccache_install(tmp_path / "idf", "4.12.1", mtime=2_000_000)
+
+    assert flash.find_ccache_dir() == ccache_dir.resolve()
+
+
+def test_find_ccache_dir_ignores_whitespace_around_the_prefix(tmp_path, monkeypatch):
+    monkeypatch.setenv("ESPHOME_ESP_IDF_PREFIX", f"  {tmp_path}	")
+    ccache_dir = _fake_ccache_install(tmp_path, "4.12.1", mtime=2_000_000)
+
+    assert flash.find_ccache_dir() == ccache_dir.resolve()
+
+
+def test_find_ccache_dir_reads_a_blank_prefix_as_unset(tmp_path, monkeypatch):
+    # Path("") is the CWD, which is both wrong and what esphome clean-all would
+    # delete, so a blank override has to fall back to the machine-global dir.
+    import platformdirs
+
+    monkeypatch.setattr(platformdirs, "user_cache_dir", lambda *a, **kw: str(tmp_path))
+    ccache_dir = _fake_ccache_install(tmp_path / "idf", "4.12.1", mtime=2_000_000)
+
+    monkeypatch.setenv("ESPHOME_ESP_IDF_PREFIX", "   ")
+    assert flash.find_ccache_dir() == ccache_dir.resolve()
+
+    monkeypatch.delenv("ESPHOME_ESP_IDF_PREFIX")
+    assert flash.find_ccache_dir() == ccache_dir.resolve()
 
 
 def test_build_env_puts_ccache_first_on_the_path(tmp_path, monkeypatch):

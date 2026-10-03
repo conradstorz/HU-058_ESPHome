@@ -259,16 +259,16 @@ def find_ccache_dir() -> Path | None:
     IDF_CCACHE_ENABLE=0 and recompiles the framework from scratch. Putting the
     directory on our PATH lets the probe find it, which is what switches on
     CCACHE_BASEDIR and lets two clocks with identical source share objects.
-    """
-    import platformdirs
 
-    prefix = os.environ.get("ESPHOME_ESP_IDF_PREFIX")
-    root = (
-        Path(prefix)
-        if prefix
-        else Path(platformdirs.user_cache_dir("esphome", appauthor=False)) / "idf"
-    )
-    tools = root / "tools" / "ccache"
+    ESPHome is asked where its tools live rather than that path being rebuilt
+    here, so an ESPHOME_ESP_IDF_PREFIX override cannot send the build one way
+    and this lookup another. It is the same call the build makes, which strips
+    whitespace, expands ~, resolves symlinks, and reads a blank override as
+    unset.
+    """
+    from esphome.build_helpers.tools_cache import IDF_TOOLS_CACHE, tools_cache_path
+
+    tools = tools_cache_path(*IDF_TOOLS_CACHE) / "tools" / "ccache"
     found = list(tools.glob("*/*/ccache.exe")) + list(tools.glob("*/*/ccache"))
     # Newest by mtime, not by name: the directories are version numbers, and
     # sorting those as strings puts 4.9 after 4.12.1.
