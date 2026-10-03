@@ -393,3 +393,23 @@ def test_check_shell_ignores_msystem_off_windows(monkeypatch):
     monkeypatch.setattr(flash.sys, "platform", "linux")
     monkeypatch.setenv("MSYSTEM", "MINGW64")
     flash.check_shell()
+
+
+# --- the example registry ---------------------------------------------------
+
+# devices.yaml is gitignored, so devices.yaml.example is the only version of
+# the registry a reader ever sees. It is hand written and nothing else loads
+# it, which is exactly how an example drifts into a shape flash.py rejects.
+
+EXAMPLE_REGISTRY = Path(__file__).resolve().parents[1] / "devices.yaml.example"
+
+
+def test_the_example_registry_still_loads():
+    devices = flash.load_registry(EXAMPLE_REGISTRY)
+    assert [d.name for d in devices] == ["wifi-clock", "clock-20260929-0912"]
+    assert all(flash.normalize_mac(d.mac) == d.mac for d in devices)
+
+
+def test_a_missing_registry_is_empty_not_an_error(tmp_path):
+    # What a fresh clone has, now that the real registry is not committed.
+    assert flash.load_registry(tmp_path / "devices.yaml") == []

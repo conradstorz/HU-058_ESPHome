@@ -2,6 +2,15 @@
 /.esphome/
 /secrets.yaml
 
+# The clock registry and the device files flash.py mints from it. Both are a
+# record of the boards on one workstation, so neither belongs in the repo.
+# flash.py creates devices.yaml from nothing on a first run and rewrites a
+# missing <name>.yaml from it, and devices.yaml.example shows the shape.
+# The digit range keeps clock-base.yaml, which is shared config and is
+# tracked, as is wifi-clock.yaml, the device file the docs validate against.
+/devices.yaml
+/clock-[0-9]*.yaml
+
 # Python
 /.venv/
 /venv/

@@ -1,0 +1,23 @@
+# Example registry. The real devices.yaml is gitignored, because it is a record
+# of the boards on one workstation and means nothing on another.
+#
+# There is nothing to copy. flash.py creates devices.yaml, header and all, the
+# first time it sees a clock, and rewrites it on every run after that. This
+# file is here to show the shape, so a reader knows what the registry holds
+# without having to flash something to find out.
+#
+# One entry per clock, keyed by the ESP32 factory MAC address. MACs are quoted
+# on purpose: an all-digit MAC would otherwise parse as a YAML 1.1 sexagesimal
+# integer. `name` is what Home Assistant knows the clock as and what its
+# api_key_<name> and ota_password_<name> secrets are named after, so it is the
+# one field that must never change for a clock already paired.
+
+devices:
+- mac: '24:0a:c4:00:00:01'
+  name: wifi-clock
+  friendly_name: WiFi Clock
+  first_flashed: '2026-09-28'
+- mac: '24:0a:c4:00:00:02'
+  name: clock-20260929-0912
+  friendly_name: Clock 2026-09-29 09:12
+  first_flashed: '2026-09-29T09:12:50'
