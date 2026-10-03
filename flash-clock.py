@@ -2,9 +2,10 @@
 """Launcher: flash an HU-058 clock from the repository root.
 
 Does what the firmware README tells you to do by hand, so you do not have to
-remember the subdirectory. Checks the shell and the toolchain, makes sure
-there is a secrets.yaml, then hands off to firmware/esphome/flash.py, which
-owns every decision about the clock's identity.
+remember the subdirectory. Checks the toolchain, checks the shell can build,
+makes sure there is a secrets.yaml, then hands off to
+firmware/esphome/flash.py, which owns every decision about the clock's
+identity.
 
 Stdlib only, so it runs on any machine with Python 3.12 or newer. Everything
 after the launcher's own flags goes straight through:
@@ -59,11 +60,14 @@ class LauncherError(Exception):
 # --- preflight --------------------------------------------------------------
 
 def check_shell() -> None:
-    """Refuse to run under Git Bash / MSYS on Windows.
+    """Refuse to build under Git Bash / MSYS on Windows.
 
     The firmware README records the failure: that shell compiles with no error
     and produces no build output, so the upload fails afterwards with nothing
     to explain why. Better to stop here than to burn a flash on it.
+
+    Only the build is affected, so main() skips this for the runs that do not
+    compile anything: --help, and --register-only.
     """
     if sys.platform == "win32" and os.environ.get("MSYSTEM"):
         raise LauncherError(
@@ -72,6 +76,33 @@ def check_shell() -> None:
             "Run this from PowerShell or cmd instead:\n"
             "    python flash-clock.py"
         )
+
+
+def is_abbrev_of(arg: str, option: str) -> bool:
+    """True if argparse would read arg as option.
+
+    It accepts any unambiguous prefix of a long option, so --reg reaches
+    flash.py as --register-only and --h as --help. Two dashes alone are the
+    end-of-options separator, not a prefix of anything.
+    """
+    return len(arg) > 2 and option.startswith(arg)
+
+
+def skips_the_build(args: list[str]) -> bool:
+    """True if these arguments make flash.py return before it compiles.
+
+    Printing help and registering a clock both work in any shell, so neither
+    needs the shell check; only a compile does. This has to agree with
+    flash.py's parser or the check would fire on a run that never builds.
+    Arguments after a bare -- are passed through rather than parsed, so help
+    on that side of it does not count.
+    """
+    for arg in args:
+        if arg == "--":
+            break
+        if arg == "-h" or is_abbrev_of(arg, "--help") or is_abbrev_of(arg, "--register-only"):
+            return True
+    return False
 
 
 def find_uv() -> str:
@@ -229,10 +260,14 @@ def run(uv: str, args: list[str], sync: bool = True) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    # The launcher prints its own page only when asked first. A help flag
+    # anywhere else is flash.py's to answer, and either way nothing compiles.
     wants_help = bool(args) and args[0] in {"-h", "--help"}
+    will_build = not skips_the_build(args)
 
     try:
-        check_shell()
+        if will_build:
+            check_shell()
         check_layout()
         uv = find_uv()
         if wants_help:

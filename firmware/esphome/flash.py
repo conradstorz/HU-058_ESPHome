@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
 import secrets as pysecrets
 import subprocess
@@ -33,6 +34,30 @@ _MAC_PART_RE = re.compile(r"^[0-9a-f]{2}$")
 
 class FlashError(Exception):
     """Something the user has to fix. main() prints it and exits 1."""
+
+
+# --- preflight --------------------------------------------------------------
+
+def check_shell() -> None:
+    """Refuse to build under Git Bash / MSYS on Windows.
+
+    ESP-IDF's cmake and ninja steps do not run in that shell. ESPHome still
+    prints "Successfully compiled program", produces no build directory and no
+    firmware.factory.bin, and the upload afterwards fails with nothing to
+    explain why. flash-clock.py stops for the same reason; this is the check
+    for anyone running flash.py directly, agents included.
+
+    Only the build is affected. Registration reads the MAC with esptool and
+    writes files, all of which work here, so --register-only does not call
+    this.
+    """
+    if sys.platform == "win32" and os.environ.get("MSYSTEM"):
+        raise FlashError(
+            "This is a Git Bash / MSYS shell, which builds ESPHome firmware with no\n"
+            "error and no output, so the upload then fails for no visible reason.\n"
+            "Run this from PowerShell or cmd instead:\n"
+            "    uv run flash.py"
+        )
 
 
 # --- MAC handling -----------------------------------------------------------
@@ -283,6 +308,9 @@ def main(argv: list[str] | None = None) -> int:
     args, extra = parser.parse_known_args(argv)
 
     try:
+        # Only the compile breaks in that shell; registering is fine there.
+        if not args.register_only:
+            check_shell()
         port = find_port(args.port)
         mac = read_mac(port)
         device, is_new = resolve_device(mac, _now(), REGISTRY_PATH, SECRETS_PATH, HERE)

@@ -117,8 +117,9 @@ python flash-clock.py --port COM7
 python flash-clock.py --no-logs
 ```
 
-On Windows run it from PowerShell or cmd. It refuses to run under Git Bash,
-which builds this firmware with no error and no output.
+On Windows run it from PowerShell or cmd. It refuses to build under Git Bash,
+which compiles this firmware with no error and no output. `--register-only`
+compiles nothing and still works there.
 
 `firmware/esp32/panel-test/` is a bare-metal PlatformIO project that drives
 the same panel with nothing but the Arduino core. It is the better starting
