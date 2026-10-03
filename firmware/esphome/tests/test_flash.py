@@ -317,6 +317,10 @@ def test_resolve_two_devices_same_minute_errors(tmp_path):
 # --- main -------------------------------------------------------------------
 
 def test_main_register_only_does_not_flash(tmp_path, monkeypatch, capsys):
+    # Deliberately in the shell the build check rejects: registering compiles
+    # nothing, so it has to work here.
+    monkeypatch.setattr(flash.sys, "platform", "win32")
+    monkeypatch.setenv("MSYSTEM", "MINGW64")
     reg, sec = _layout(tmp_path)
     monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
     monkeypatch.setattr(flash, "SECRETS_PATH", sec)
@@ -336,6 +340,7 @@ def test_main_register_only_does_not_flash(tmp_path, monkeypatch, capsys):
 
 
 def test_main_flashes_known_device_and_passes_args(tmp_path, monkeypatch):
+    monkeypatch.delenv("MSYSTEM", raising=False)  # not Git Bash
     reg, sec = _layout(tmp_path)
     flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
     monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
@@ -356,9 +361,38 @@ def test_main_flashes_known_device_and_passes_args(tmp_path, monkeypatch):
 
 
 def test_main_reports_flash_error(monkeypatch, capsys):
+    monkeypatch.delenv("MSYSTEM", raising=False)  # not Git Bash
     monkeypatch.setattr(flash, "find_port", lambda explicit: (_ for _ in ()).throw(flash.FlashError("No USB serial port found")))
     assert flash.main([]) == 1
     assert "No USB serial port found" in capsys.readouterr().err
+
+
+# --- the Git Bash guard -----------------------------------------------------
+
+# ESP-IDF's cmake and ninja steps do not run under MSYS: ESPHome reports a
+# successful compile, writes no firmware, and the upload then fails with
+# nothing to explain it. flash-clock.py refuses that shell, and so must this
+# script, which the README documents as a direct entry point.
+
+def test_main_refuses_a_git_bash_build_before_touching_the_port(monkeypatch, capsys):
+    monkeypatch.setattr(flash.sys, "platform", "win32")
+    monkeypatch.setenv("MSYSTEM", "MINGW64")
+    monkeypatch.setattr(flash, "find_port", lambda explicit: pytest.fail("must not open a port"))
+
+    assert flash.main([]) == 1
+    assert "PowerShell" in capsys.readouterr().err
+
+
+def test_check_shell_allows_a_real_windows_shell(monkeypatch):
+    monkeypatch.setattr(flash.sys, "platform", "win32")
+    monkeypatch.delenv("MSYSTEM", raising=False)
+    flash.check_shell()
+
+
+def test_check_shell_ignores_msystem_off_windows(monkeypatch):
+    monkeypatch.setattr(flash.sys, "platform", "linux")
+    monkeypatch.setenv("MSYSTEM", "MINGW64")
+    flash.check_shell()
 
 
 # --- the example registry ---------------------------------------------------

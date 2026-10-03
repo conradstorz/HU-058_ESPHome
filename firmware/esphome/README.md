@@ -164,8 +164,9 @@ USB flashing on a WROOM-32 devkit may need to hold down BOOT while trying to
 program. Auto-reset into the bootloader does not work on every board.
 
 On Windows run these commands from PowerShell or cmd. A Git Bash / MSYS shell
-has been seen to compile with no error and produce no build output, so the
-upload then fails.
+compiles with no error and produces no build output, so the upload then fails;
+`flash.py` refuses to build there rather than let it get that far.
+`--register-only` compiles nothing and still works in any shell.
 
 Once it is on the network, updates go over the air, and the API carries the
 log stream. Use the clock's own device file:
