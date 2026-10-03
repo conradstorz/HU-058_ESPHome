@@ -137,14 +137,40 @@ def test_a_failed_write_is_reported_not_raised_raw(launcher, tmp_path, monkeypat
 # accepts abbreviations, and this launcher has to recognise the same spellings
 # or it would refuse a run that never builds.
 
-@pytest.mark.parametrize("arg", ["--register-only", "--register", "--reg", "--r"])
-def test_register_only_is_recognised_however_it_is_abbreviated(launcher, arg):
-    assert launcher.is_register_only(arg)
+# flash.py's parser accepts any unambiguous prefix of a long option, and takes
+# -h and --help anywhere, so all of these reach it as a run that never builds.
+@pytest.mark.parametrize("args", [
+    ["--register-only"],
+    ["--register"],
+    ["--reg"],
+    ["--r"],
+    ["--port", "COM7", "--register-only"],
+    ["-h"],
+    ["--help"],
+    ["--h"],
+    ["--no-logs", "--help"],
+    ["--no-logs", "-h"],
+])
+def test_a_run_that_cannot_compile_is_recognised(launcher, args):
+    assert launcher.skips_the_build(args)
 
 
-@pytest.mark.parametrize("arg", ["--port", "--no-logs", "--", "-r", "COM7"])
-def test_other_arguments_are_not_register_only(launcher, arg):
-    assert not launcher.is_register_only(arg)
+@pytest.mark.parametrize("args", [
+    [],
+    ["--no-logs"],
+    ["--port", "COM7"],
+    ["-r"],
+    ["COM7"],
+])
+def test_an_ordinary_run_does_build(launcher, args):
+    assert not launcher.skips_the_build(args)
+
+
+# Past a bare --, argparse stops reading options, so flash.py hands these to
+# esphome instead of printing help, and the compile does happen.
+@pytest.mark.parametrize("args", [["--", "--help"], ["--", "-h"]])
+def test_help_after_the_separator_still_builds(launcher, args):
+    assert not launcher.skips_the_build(args)
 
 
 @pytest.fixture
@@ -174,3 +200,10 @@ def test_register_only_is_allowed_under_git_bash(launcher, no_handoff):
 def test_help_is_allowed_under_git_bash(launcher, no_handoff, capsys):
     assert launcher.main(["--help"]) == 0
     assert no_handoff == [["--help"]]
+
+
+def test_help_after_another_argument_is_allowed_under_git_bash(launcher, no_handoff):
+    # flash.py prints its own page and exits; nothing compiles, so the shell
+    # check has no business refusing this.
+    assert launcher.main(["--no-logs", "--help"]) == 0
+    assert no_handoff == [["--no-logs", "--help"]]

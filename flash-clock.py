@@ -78,15 +78,31 @@ def check_shell() -> None:
         )
 
 
-def is_register_only(arg: str) -> bool:
-    """True for --register-only and for any prefix argparse accepts for it.
+def is_abbrev_of(arg: str, option: str) -> bool:
+    """True if argparse would read arg as option.
 
-    flash.py takes the flag through argparse, which honours unambiguous
-    abbreviations, so --reg and --r reach it as --register-only too. This has
-    to agree with that or the shell check would fire on a run that never
-    compiles.
+    It accepts any unambiguous prefix of a long option, so --reg reaches
+    flash.py as --register-only and --h as --help. Two dashes alone are the
+    end-of-options separator, not a prefix of anything.
     """
-    return len(arg) > 2 and "--register-only".startswith(arg)
+    return len(arg) > 2 and option.startswith(arg)
+
+
+def skips_the_build(args: list[str]) -> bool:
+    """True if these arguments make flash.py return before it compiles.
+
+    Printing help and registering a clock both work in any shell, so neither
+    needs the shell check; only a compile does. This has to agree with
+    flash.py's parser or the check would fire on a run that never builds.
+    Arguments after a bare -- are passed through rather than parsed, so help
+    on that side of it does not count.
+    """
+    for arg in args:
+        if arg == "--":
+            break
+        if arg == "-h" or is_abbrev_of(arg, "--help") or is_abbrev_of(arg, "--register-only"):
+            return True
+    return False
 
 
 def find_uv() -> str:
@@ -244,10 +260,10 @@ def run(uv: str, args: list[str], sync: bool = True) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    # The launcher prints its own page only when asked first. A help flag
+    # anywhere else is flash.py's to answer, and either way nothing compiles.
     wants_help = bool(args) and args[0] in {"-h", "--help"}
-    # Printing flags and registering a clock both work in any shell. Only the
-    # compile is broken under Git Bash, so only that run is refused.
-    will_build = not wants_help and not any(is_register_only(a) for a in args)
+    will_build = not skips_the_build(args)
 
     try:
         if will_build:
