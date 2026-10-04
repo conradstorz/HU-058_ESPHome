@@ -324,6 +324,7 @@ def test_main_register_only_does_not_flash(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(flash.sys, "platform", "win32")
     monkeypatch.setenv("MSYSTEM", "MINGW64")
     reg, sec = _layout(tmp_path)
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path / "backup")
     monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
     monkeypatch.setattr(flash, "SECRETS_PATH", sec)
     monkeypatch.setattr(flash, "HERE", tmp_path)
@@ -345,6 +346,7 @@ def test_main_flashes_known_device_and_passes_args(tmp_path, monkeypatch):
     monkeypatch.delenv("MSYSTEM", raising=False)  # not Git Bash
     reg, sec = _layout(tmp_path)
     flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path / "backup")
     monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
     monkeypatch.setattr(flash, "SECRETS_PATH", sec)
     monkeypatch.setattr(flash, "HERE", tmp_path)
@@ -362,8 +364,9 @@ def test_main_flashes_known_device_and_passes_args(tmp_path, monkeypatch):
     assert kw["cwd"] == tmp_path
 
 
-def test_main_reports_flash_error(monkeypatch, capsys):
+def test_main_reports_flash_error(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("MSYSTEM", raising=False)  # not Git Bash
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path / "backup")
     monkeypatch.setattr(flash, "find_port", lambda explicit: (_ for _ in ()).throw(flash.FlashError("No USB serial port found")))
     assert flash.main([]) == 1
     assert "No USB serial port found" in capsys.readouterr().err
@@ -721,6 +724,82 @@ def test_restore_warns_on_an_archive_it_cannot_open(tmp_path, monkeypatch, capsy
     assert not reg.exists()
 
 
+def test_main_backs_up_after_registering(tmp_path, monkeypatch):
+    monkeypatch.delenv("MSYSTEM", raising=False)  # not Git Bash
+    reg, sec = _layout(tmp_path)
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path / "backup")
+    monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(flash, "SECRETS_PATH", sec)
+    monkeypatch.setattr(flash, "HERE", tmp_path)
+    monkeypatch.setattr(flash, "find_port", lambda explicit: "COM4")
+    monkeypatch.setattr(flash, "read_mac", lambda port: "aa:bb:cc:dd:ee:ff")
+    monkeypatch.setattr(flash, "_now", lambda: NOW)
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: 0)
+
+    assert flash.main([]) == 0
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "devices.yaml", "secrets.yaml"]
+        assert "aa:bb:cc:dd:ee:ff" in z.read("devices.yaml").decode()
+
+
+def test_main_backs_up_under_register_only(tmp_path, monkeypatch):
+    reg, sec = _layout(tmp_path)
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path / "backup")
+    monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(flash, "SECRETS_PATH", sec)
+    monkeypatch.setattr(flash, "HERE", tmp_path)
+    monkeypatch.setattr(flash, "find_port", lambda explicit: "COM4")
+    monkeypatch.setattr(flash, "read_mac", lambda port: "aa:bb:cc:dd:ee:ff")
+    monkeypatch.setattr(flash, "_now", lambda: NOW)
+    monkeypatch.setattr(flash.subprocess, "call", lambda *a, **k: pytest.fail("esphome must not run"))
+
+    assert flash.main(["--register-only"]) == 0
+    assert flash.backup_path().exists()
+
+
+def test_main_restores_before_reading_the_registry(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("MSYSTEM", raising=False)  # not Git Bash
+    reg, sec = _layout(tmp_path)
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path / "backup")
+    monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(flash, "SECRETS_PATH", sec)
+    monkeypatch.setattr(flash, "HERE", tmp_path)
+    monkeypatch.setattr(flash, "find_port", lambda explicit: "COM4")
+    monkeypatch.setattr(flash, "read_mac", lambda port: "aa:bb:cc:dd:ee:ff")
+    monkeypatch.setattr(flash, "_now", lambda: NOW)
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: 0)
+    flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+    flash.backup_local_data()
+    name_before = flash.load_registry(reg)[0].name
+    reg.unlink()  # the git pull
+
+    assert flash.main([]) == 0
+
+    out = capsys.readouterr().out
+    assert "Restored devices.yaml" in out
+    # The clock keeps the identity Home Assistant already paired with.
+    assert "Known clock on COM4" in out
+    assert flash.load_registry(reg)[0].name == name_before
+
+
+def test_main_returns_the_flash_exit_code_even_if_the_backup_fails(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("MSYSTEM", raising=False)  # not Git Bash
+    reg, sec = _layout(tmp_path)
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path / "backup")
+    monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(flash, "SECRETS_PATH", sec)
+    monkeypatch.setattr(flash, "HERE", tmp_path)
+    monkeypatch.setattr(flash, "find_port", lambda explicit: "COM4")
+    monkeypatch.setattr(flash, "read_mac", lambda port: "aa:bb:cc:dd:ee:ff")
+    monkeypatch.setattr(flash, "_now", lambda: NOW)
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: 7)
+    (tmp_path / "backup").write_text("")  # a file where the directory needs to be
+
+    assert flash.main([]) == 7
+    assert "warning" in capsys.readouterr().err
+
+
 # --- the build cache --------------------------------------------------------
 
 # ESPHome installs ccache with the ESP-IDF tools but resolves whether to use it
@@ -819,6 +898,7 @@ def test_main_hands_the_build_env_to_esphome(tmp_path, monkeypatch):
     monkeypatch.delenv("MSYSTEM", raising=False)  # not Git Bash
     reg, sec = _layout(tmp_path)
     flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path / "backup")
     monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
     monkeypatch.setattr(flash, "SECRETS_PATH", sec)
     monkeypatch.setattr(flash, "HERE", tmp_path)

@@ -151,6 +151,25 @@ together. The registry is what stops `flash.py` minting a second identity for
 a clock Home Assistant has already paired, and the secrets are the keys that
 pairing uses. Lose the pair and every clock has to be re-added by hand.
 
+`flash.py` keeps its own copy of both, so losing them takes more than one
+mistake. Every flash writes `devices.yaml` and `secrets.yaml` into
+`HU-058_clock_safety_backup_of_local_data.zip` in your user data directory
+(`%LOCALAPPDATA%\HU-058_ESPHome\` on Windows,
+`~/.local/share/HU-058_ESPHome/` elsewhere), along with a `README.md`
+explaining what the archive is. If either file is missing when you next run
+`flash.py`, it is restored from there before the registry is read, and the run
+says so.
+
+The archive is outside the repository on purpose. Both files are gitignored,
+and git treats an untracked ignored file as expendable: it deletes one on a
+`git pull` carrying the commit that untracked it, silently overwrites one on a
+`git checkout` of an earlier commit and deletes it again on the way back, and
+removes one with `git clean -xdf`. A copy kept in the working tree would go in
+the same command as the original. It is one rolling copy, not a history, and it
+is not a substitute for backing the pair up somewhere off this machine — and
+because it contains `secrets.yaml`, it is not encrypted and should not be
+synced or shared.
+
 It checks the chip before it writes anything. A board that is not an ESP32
 (the kit's own ESP8266, say) is refused with esptool's "This chip is ESP8266,
 not ESP32" message and nothing is registered.

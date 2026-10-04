@@ -631,9 +631,14 @@ def main(argv: list[str] | None = None) -> int:
         # Only the compile breaks in that shell; registering is fine there.
         if not args.register_only:
             check_shell()
+        # Before the registry is read: a missing one mints a second identity
+        # for a clock Home Assistant has already paired.
+        restore_local_data()
         port = find_port(args.port)
         mac = read_mac(port)
         device, is_new = resolve_device(mac, _now(), REGISTRY_PATH, SECRETS_PATH, HERE)
+        # The registry is final now, so even an upload that fails leaves a copy.
+        backup_local_data()
     except FlashError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
