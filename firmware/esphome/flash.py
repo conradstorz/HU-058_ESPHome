@@ -122,20 +122,27 @@ class Device:
     first_flashed: str
 
 
-def load_registry(path: Path) -> list[Device]:
-    if not path.exists():
-        return []
+def load_registry_text(text: str, label: str) -> list[Device]:
+    """Parse registry text. label names the source in any error message.
+
+    Split out of load_registry() for the copy inside the safety archive, which
+    arrives as bytes out of a zip and has no file to read. It used to be
+    written into a tempfile.TemporaryDirectory() just to get a path - the one
+    thing in that feature that wrote outside both the repository and
+    backup_dir() - and parsing text directly removes both the round trip and
+    the second copy of the extraction code.
+    """
     try:
-        raw = yaml.safe_load(path.read_text())
+        raw = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise FlashError(f"{path.name} is not valid YAML: {e}")
+        raise FlashError(f"{label} is not valid YAML: {e}")
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
-        raise FlashError(f"{path.name} should be a YAML mapping at the top level")
+        raise FlashError(f"{label} should be a YAML mapping at the top level")
     devices = raw.get("devices")
     if devices is not None and not isinstance(devices, list):
-        raise FlashError(f"{path.name}: 'devices' should be a list")
+        raise FlashError(f"{label}: 'devices' should be a list")
     return [
         Device(
             mac=normalize_mac(str(d["mac"])),
@@ -145,6 +152,12 @@ def load_registry(path: Path) -> list[Device]:
         )
         for d in devices or []
     ]
+
+
+def load_registry(path: Path) -> list[Device]:
+    if not path.exists():
+        return []
+    return load_registry_text(path.read_text(), path.name)
 
 
 def save_registry(path: Path, devices: list[Device]) -> None:
@@ -375,6 +388,12 @@ def backup_readme(files: list[str], clocks: int | None) -> str:
         "file that still exists is never overwritten automatically, so move the\n"
         "current one aside first if you mean to replace it.\n"
         "\n"
+        f"Any `{ARCHIVE_NAME}.unreadable-*.zip` beside this one is an\n"
+        "older archive `flash.py` could not open, set aside rather than deleted in\n"
+        "case anything can still be unzipped out of it by hand. The live archive is\n"
+        f"always `{ARCHIVE_NAME}` exactly; delete a set-aside copy once\n"
+        "you are done with it.\n"
+        "\n"
         "## Why this lives outside the repository\n"
         "\n"
         "Both files are gitignored, and git treats an untracked ignored file as\n"
@@ -392,32 +411,39 @@ def backup_readme(files: list[str], clocks: int | None) -> str:
     )
 
 
-def _archive_state(path: Path) -> tuple[set[str], int | None]:
-    """What an existing archive holds: its data members, and its clock count.
+def _archive_state(path: Path) -> tuple[set[str], list[str] | None]:
+    """What an existing archive holds: its data members, and its clock names.
 
     One open for both answers, because they come from the same file and two
     opens could see two different ones.
 
-    The clock count is None when the archive is there but the question could
-    not be answered: a damaged member, a central directory that will not
-    parse, a registry that will not load. That is a different fact from 0,
-    which means a readable archive whose registry genuinely holds no clocks,
-    and the caller has to tell them apart - an unreadable archive is the one
-    thing that must never be overwritten, and reporting it as empty disarms
+    The names rather than the count. len() is the count, so nothing is lost,
+    and the staleness guard needs the names: a rollback that substitutes one
+    clock for another keeps the count identical, and a guard that can only see
+    a count cannot see that at all.
+
+    The names are None when the archive is there but the question could not be
+    answered: a damaged member, a central directory that will not parse, a
+    registry that will not load. That is a different fact from [], which means
+    a readable archive whose registry genuinely holds no clocks, and the
+    caller has to tell them apart - an unreadable archive is the one thing
+    that must never be overwritten in place, and reporting it as empty disarms
     exactly the guards that would have saved it.
 
-    The member set is kept even when the count fails, so an archive with a
-    readable central directory and a damaged member still gets the more
-    specific "it still holds X" warning out of the loss guard.
+    The member set is kept even when the names fail, and it is also what tells
+    the two unreadable states apart: a non-empty set means the central
+    directory parsed and a member did not, which still gets the more specific
+    "it still holds X" warning out of the loss guard and is never set aside.
+    An empty set with None means the archive would not open at all.
     """
     if not path.exists():
-        return set(), 0
+        return set(), []
     members: set[str] = set()
     try:
         with zipfile.ZipFile(path) as z:
             members = {n for n in z.namelist() if n in BACKUP_MEMBERS}
             if "devices.yaml" not in members:
-                return members, 0
+                return members, []
             raw = z.read("devices.yaml")
     except Exception:
         # Deliberately broad, like the probe in _backup_candidates below: a
@@ -426,12 +452,9 @@ def _archive_state(path: Path) -> tuple[set[str], int | None]:
         # flash.
         return members, None
     try:
-        # Through load_registry(), not a second reading of the schema: one
+        # Through the same parser the working tree's copy goes through, so one
         # place decides what a registry is and what counts as a clock in it.
-        with tempfile.TemporaryDirectory() as d:
-            extracted = Path(d) / "devices.yaml"
-            extracted.write_bytes(raw)
-            return members, len(load_registry(extracted))
+        return members, [d.name for d in load_registry_text(raw.decode(), "devices.yaml")]
     except Exception:
         return members, None
 
@@ -462,40 +485,27 @@ def _backup_candidates(paths: dict[str, Path]) -> list[tuple[str, Path]]:
     return out
 
 
-def _archived_clock_names(path: Path) -> set[str]:
-    """The clock names the registry inside an existing archive holds.
-
-    Empty on any failure, which is safe only because of where this is called
-    from. backup_local_data() has already returned, keeping the archive, when
-    _archive_state() could not read it, so by the time this runs the archive
-    has been read through once successfully. An empty answer here therefore
-    means an archive with no registry to compare against, not one whose
-    registry could not be read.
-
-    Through load_registry(), like _archive_state(), so one place decides what
-    a registry is and what counts as a clock in it.
-    """
-    try:
-        with zipfile.ZipFile(path) as z:
-            raw = z.read("devices.yaml")
-        with tempfile.TemporaryDirectory() as d:
-            extracted = Path(d) / "devices.yaml"
-            extracted.write_bytes(raw)
-            return {device.name for device in load_registry(extracted)}
-    except Exception:
-        return set()
-
-
-def _stale_dropped_clocks(archive: Path, registry: Path, secrets: Path) -> list[str]:
+def _stale_dropped_clocks(archived: list[str], registry: Path, secrets: Path) -> list[str]:
     """Clocks the archive holds, this registry does not, and secrets still key.
 
     The discriminator between a hand edit and a substitution. Dropping a
-    scrapped board's entry by hand takes its api_key_* with it, or knowingly
-    orphans it. A `git checkout` of any commit from before devices.yaml was
-    untracked rolls the registry back and leaves secrets.yaml - which git
-    never tracked, so nothing touches it - holding the keys of every clock the
-    rollback dropped. A dropped clock whose API key is still here is the
-    signature of the substitution.
+    scrapped board's entry by hand takes its api_key_* with it. A `git
+    checkout` of any commit from before devices.yaml was untracked rolls the
+    registry back and leaves secrets.yaml - which git never tracked, so
+    nothing touches it - holding the keys of every clock the rollback dropped.
+    A dropped clock whose API key is still here is the signature of the
+    substitution, and that is what this fires on: an api_key_* knowingly
+    orphaned by hand looks exactly like a rollback from here and keeps the
+    archive on every run until those lines go too. The warning says so.
+
+    The archived names are passed in from _archive_state()'s single open, not
+    read out of the zip again: a second open can see a different file, and the
+    old second read defaulted to "no names" on failure, which failed in the
+    unsafe direction by allowing the write.
+
+    Asked on any dropped name, not only on a count that shrank. A rollback
+    that drops one clock and brings back another leaves the count alone, and
+    that is the quietest version of this loss, not the harmless one.
 
     secret_names() rather than a second spelling of the convention, so the
     name-to-secret-key mapping has one source of truth.
@@ -505,7 +515,7 @@ def _stale_dropped_clocks(archive: Path, registry: Path, secrets: Path) -> list[
     refuse the backup; backup_local_data() must never raise.
     """
     try:
-        dropped = _archived_clock_names(archive) - {d.name for d in load_registry(registry)}
+        dropped = set(archived) - {d.name for d in load_registry(registry)}
         if not dropped:
             return []
         present = _secret_keys(secrets)
@@ -519,6 +529,43 @@ def _stale_dropped_clocks(archive: Path, registry: Path, secrets: Path) -> list[
     return stale
 
 
+def _set_aside_dead_archive(target: Path) -> Path:
+    """Move an archive that will not open at all out of the way, and say where.
+
+    The owner's ruling, for the one unreadable state where it costs nothing:
+    refusing forever left the safety backup disabled until somebody read
+    stderr, and a zip whose central directory will not parse still holds every
+    member's bytes for manual recovery. Those bytes are kept under a name that
+    says what they are, and the fresh backup is written as planned.
+
+    Renamed, never copied. os.replace() moves the bytes atomically, so at
+    every instant exactly one file in backup_dir() holds them: a copy could
+    exhaust the disk and leave a truncated duplicate for the write to then
+    make the only copy, and it would double the on-disk footprint of a file
+    full of credentials.
+
+    A mkstemp-unique name, not a timestamp. A fixed name clobbers the previous
+    set-aside, and second-resolution stamps collide between concurrent runs -
+    this project already has a documented same-minute collision in
+    resolve_device(). The cost is one stray empty file per hard kill, which is
+    left alone on purpose: a sweep cannot tell a dead temporary from a
+    concurrent run's live one.
+    """
+    fd, name = tempfile.mkstemp(dir=target.parent, prefix=ARCHIVE_NAME + ".unreadable-", suffix=".zip")
+    os.close(fd)
+    aside = Path(name)
+    os.replace(target, aside)
+    # After the replace, not before: the rename gives this path the dead
+    # file's inode and therefore its mode, not mkstemp's. Usually already
+    # 0600, but an archive mangled by a third party can carry any mode, and
+    # this one may hold credentials. Best effort, like the archive's own.
+    try:
+        os.chmod(aside, 0o600)
+    except OSError:
+        pass
+    return aside
+
+
 def backup_local_data() -> None:
     """Copy devices.yaml and secrets.yaml into the safety archive.
 
@@ -526,9 +573,10 @@ def backup_local_data() -> None:
     so every failure warns and returns.
     """
     tmp = None
+    aside = None
     try:
         target = backup_path()
-        existing, archived = _archive_state(target)
+        existing, archived_names = _archive_state(target)
         paths = _local_data_paths()
         candidates = _backup_candidates(paths)
         names = {n for n, _ in candidates}
@@ -545,24 +593,71 @@ def backup_local_data() -> None:
             return
         if not candidates:
             return
-        # Before any comparison against the archive, because there is nothing
-        # to compare against: an archive that cannot be read is the one copy
-        # that might still hold keys Home Assistant has and nothing else does.
-        if archived is None:
+        # The registry candidate and its clock count bound together, because
+        # every guard below reads them as a pair: clocks is not None exactly
+        # when registry is not None. They used to be assigned inside the
+        # candidates loop, which was correct only by implication.
+        registry = next((p for n, p in candidates if n == "devices.yaml"), None)
+        clocks = len(load_registry(registry)) if registry is not None else None
+        # An archive that cannot be read is the one copy that might still hold
+        # keys Home Assistant has and nothing else does, so nothing is ever
+        # overwritten in place here. What happens instead depends on which of
+        # the two unreadable states it is.
+        if archived_names is None:
+            if existing:
+                # The central directory parsed and a member did not, so the
+                # member set is known - and it is what closes the loss. An
+                # archive holding {devices.yaml, secrets.yaml} with a damaged
+                # registry, in a run whose secrets.yaml is missing, is refused
+                # by the loss guard above. Setting it aside instead would turn
+                # that closed loss into an open one: a one-member fresh archive
+                # would be written and the only copy of the keys would live in
+                # a quarantined file the tool cannot read.
+                print(
+                    f"warning: keeping the existing safety backup {target}: it cannot be "
+                    "read, so there is no telling what overwriting it would lose. Unzip "
+                    "what you can from it, then delete it and the next run will write a "
+                    "fresh one.",
+                    file=sys.stderr,
+                )
+                return
+            # It would not open at all, so its member set was already unknown
+            # and setting it aside costs no guard anything it did not lack.
+            # The empty-registry guard first, though: after the set-aside there
+            # is nothing left to compare against, and a registry truncated to
+            # nothing - or missing entirely - would become the fresh archive.
+            if not clocks:
+                print(
+                    f"warning: keeping the existing safety backup {target}: it cannot be "
+                    "read, and there are no clocks here to put in a fresh one. Unzip what "
+                    "you can from it, then delete it and the next run will write a fresh "
+                    "one.",
+                    file=sys.stderr,
+                )
+                return
+            try:
+                aside = _set_aside_dead_archive(target)
+            except Exception as e:
+                # Refuse the write. Falling through to it after a failed
+                # set-aside is the original data-loss bug with extra steps.
+                print(
+                    f"warning: keeping the existing safety backup {target}: it cannot be "
+                    f"read, and moving it aside to make room for a fresh one failed: {e}. "
+                    "Unzip what you can from it, then delete it and the next run will "
+                    "write a fresh one.",
+                    file=sys.stderr,
+                )
+                return
             print(
-                f"warning: keeping the existing safety backup {target}: it cannot be "
-                "read, so there is no telling what overwriting it would lose. Unzip "
-                "what you can from it, then delete it and the next run will write a "
-                "fresh one.",
+                f"warning: the safety backup {target} cannot be read, so its bytes have "
+                f"been set aside as {aside} and a fresh backup written in their place. "
+                "Unzip what you can from the set-aside file, then delete it.",
                 file=sys.stderr,
             )
-            return
-        clocks = None
-        registry = None
-        for name, path in candidates:
-            if name == "devices.yaml":
-                clocks = len(load_registry(path))
-                registry = path
+            # Nothing left to compare against, and nothing left to lose: every
+            # guard below is a comparison with the archive that just moved.
+            archived_names = []
+        archived = len(archived_names)
         # A zero-byte devices.yaml is valid YAML and loads as no clocks at all,
         # so truncation to nothing clears every check above with its member set
         # intact.
@@ -573,24 +668,27 @@ def backup_local_data() -> None:
                 file=sys.stderr,
             )
             return
-        if clocks is not None and archived > clocks:
-            # Last of the four guards on purpose. It reopens the archive and
-            # reads secrets.yaml, and only a count that has already shrunk
-            # makes either worth doing - the three guards above decide every
-            # other case without either read.
-            if stale := _stale_dropped_clocks(target, registry, paths["secrets.yaml"]):
+        # Top level, on any clock the archive holds and this registry does not.
+        # It used to be nested inside the shrink warning below, which asked it
+        # the wrong question: a rollback that drops one clock and brings
+        # another back keeps the count identical, never reached the guard, and
+        # wrote the archive with no warning at all - more quietly than the
+        # shrink that was guarded. Found by the whole-branch review.
+        if registry is not None:
+            if stale := _stale_dropped_clocks(archived_names, registry, paths["secrets.yaml"]):
                 print(
-                    f"warning: keeping the existing safety backup {target}: devices.yaml is "
-                    f"down to {clocks} from {archived} clocks, but secrets.yaml still holds "
-                    f"the API key for {', '.join(stale)}. That reads as a registry rolled "
-                    "back rather than edited - a git checkout of a commit from before "
-                    "devices.yaml was untracked overwrites it in place - so the backup keeps "
-                    "the longer registry. If you did mean to drop those clocks, take their "
-                    "api_key_* and ota_password_* lines out of secrets.yaml too and run "
-                    "again.",
+                    f"warning: keeping the existing safety backup {target}: its registry "
+                    f"holds {', '.join(stale)}, devices.yaml here does not, and "
+                    "secrets.yaml still holds their API keys. That reads as a registry "
+                    "rolled back rather than edited - a git checkout of a commit from "
+                    "before devices.yaml was untracked overwrites it in place - so the "
+                    "backup keeps what it has. If you did mean to drop those clocks, take "
+                    "their api_key_* and ota_password_* lines out of secrets.yaml too and "
+                    "run again.",
                     file=sys.stderr,
                 )
                 return
+        if clocks is not None and archived > clocks:
             # Dropping a scrapped board's entry by hand is legitimate and has to
             # reach the backup. It just says so on the way past.
             print(
@@ -636,7 +734,18 @@ def backup_local_data() -> None:
                 file=sys.stderr,
             )
     except Exception as e:
-        print(f"warning: could not write the safety backup: {e}", file=sys.stderr)
+        if aside is None:
+            print(f"warning: could not write the safety backup: {e}", file=sys.stderr)
+        else:
+            # backup_path() is simply absent now. A user told only that the
+            # write failed would go looking there and find nothing at all, so
+            # this message has to name the set-aside too: that file is where
+            # their last backup actually is.
+            print(
+                f"warning: could not write the safety backup: {e}. The unreadable archive "
+                f"it was replacing is set aside at {aside}.",
+                file=sys.stderr,
+            )
         if tmp is not None:
             try:
                 tmp.unlink(missing_ok=True)

@@ -172,6 +172,37 @@ def test_load_registry_non_list_devices_errors(tmp_path):
         flash.load_registry(path)
 
 
+@pytest.mark.parametrize("text", [
+    "",
+    "devices:\n",
+    "devices:\n- mac: 20:50:0D:17:F4:58\n  name: a\n  friendly_name: A\n  first_flashed: 2026-10-03\n",
+    "devices: [unclosed",
+    "devices: nope",
+    "just a string",
+])
+def test_load_registry_text_matches_load_registry_on_the_same_content(tmp_path, text):
+    # One place decides what a registry is. The archive reads its copy out of
+    # the zip as text, with no temporary file anywhere outside the repository
+    # and backup_dir(), so both callers have to agree exactly - including on
+    # which FlashError the bad shapes raise.
+    path = tmp_path / "devices.yaml"
+    path.write_text(text)
+
+    try:
+        expected = flash.load_registry(path)
+    except flash.FlashError as e:
+        with pytest.raises(flash.FlashError) as got:
+            flash.load_registry_text(text, "devices.yaml")
+        assert str(got.value) == str(e)
+    else:
+        assert flash.load_registry_text(text, "devices.yaml") == expected
+
+
+def test_load_registry_text_puts_the_label_in_its_errors():
+    with pytest.raises(flash.FlashError, match="archived devices.yaml is not valid YAML"):
+        flash.load_registry_text("devices: [unclosed", "archived devices.yaml")
+
+
 # --- port discovery ---------------------------------------------------------
 
 class _Port:
@@ -526,6 +557,23 @@ ARCHIVED_REGISTRY = (
 ARCHIVED_SECRETS = "wifi_ssid: net\napi_key_clock_x: archived-key\n"
 
 
+def _set_asides(archive):
+    """The quarantined copies of archives flash.py could not open, oldest first.
+
+    A glob here and nowhere in flash.py on purpose: the tool looks up exactly
+    backup_path(), so a sibling is inert to it and only the tests have to find
+    them.
+    """
+    return sorted(archive.parent.glob(flash.ARCHIVE_NAME + ".unreadable-*.zip"))
+
+
+def _dead_archive(path, text="not a zip file"):
+    """An archive zipfile cannot open at all: no members, no central directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
 def _archive_with_a_damaged_registry(path):
     """A zip whose central directory is fine and whose devices.yaml is not.
 
@@ -679,19 +727,21 @@ def test_backup_keeps_the_old_archive_when_the_registry_is_emptied(tmp_path, mon
 
 def test_archive_state_tells_an_empty_registry_from_an_unreadable_one(tmp_path, monkeypatch):
     # The distinction the overwrite guard below is built on. Collapsing both to
-    # 0 disarms every count comparison exactly when the archive is damaged.
+    # "nothing" disarms every comparison exactly when the archive is damaged.
+    # The names, not the count: len() is the count, and the staleness guard
+    # needs the names on any dropped clock rather than only a shrunk count.
     _local_data(tmp_path, monkeypatch)
     archive = flash.backup_path()
 
-    assert flash._archive_state(archive) == (set(), 0)
+    assert flash._archive_state(archive) == (set(), [])
 
     flash.backup_local_data()
-    assert flash._archive_state(archive) == ({"devices.yaml", "secrets.yaml"}, 1)
+    assert flash._archive_state(archive) == ({"devices.yaml", "secrets.yaml"}, ["clock-x"])
 
     flash.REGISTRY_PATH.write_text("")
     archive.unlink()
     flash.backup_local_data()
-    assert flash._archive_state(archive) == ({"devices.yaml", "secrets.yaml"}, 0)
+    assert flash._archive_state(archive) == ({"devices.yaml", "secrets.yaml"}, [])
 
     _archive_with_a_damaged_registry(archive)
     assert flash._archive_state(archive) == ({"devices.yaml", "secrets.yaml"}, None)
@@ -716,23 +766,130 @@ def test_backup_keeps_an_archive_whose_registry_cannot_be_read(tmp_path, monkeyp
     assert "keeping the existing safety backup" in err
     assert str(flash.backup_path()) in err
     assert "cannot be read" in err
+    # Deliberately not set aside, unlike an archive that will not open at all.
+    # The member set is known here, and it is what closes the loss: the archive
+    # holds secrets.yaml, so a run with no secrets.yaml to hand is refused by
+    # the loss guard. Quarantining it would turn that closed loss into an open
+    # one - a one-member fresh archive, and the only copy of the keys inside a
+    # file the tool cannot read.
+    assert _set_asides(flash.backup_path()) == []
 
 
-def test_backup_keeps_an_archive_that_will_not_open_at_all(tmp_path, monkeypatch, capsys):
-    # It used to list no members and report 0 clocks, which reads as "nothing
-    # to lose" and overwrote it. A zip whose end-of-central-directory record
-    # is damaged still holds every member's bytes, recoverable by hand, and
-    # that is the copy worth keeping. The warning says how to get out of it.
+def test_backup_sets_aside_an_archive_that_will_not_open_at_all(tmp_path, monkeypatch, capsys):
+    # The owner's ruling. Refusing forever left the safety backup disabled
+    # until someone read stderr; a zip whose central directory will not parse
+    # still holds every member's bytes, recoverable by hand, so the bytes are
+    # moved to a name saying what they are and a fresh backup is written in
+    # their place. The member set was already unknown, so setting it aside
+    # costs no guard anything it did not already lack.
     _local_data(tmp_path, monkeypatch)
-    flash.backup_path().parent.mkdir(parents=True, exist_ok=True)
-    flash.backup_path().write_text("not a zip file")
+    _dead_archive(flash.backup_path())
+
+    flash.backup_local_data()
+
+    aside = _set_asides(flash.backup_path())
+    assert len(aside) == 1
+    assert "unreadable" in aside[0].name
+    assert aside[0].read_text() == "not a zip file"
+    # Renamed, not copied: at no instant are there two copies of a file full of
+    # credentials, and a copy that ran out of disk would leave a truncated
+    # duplicate for the write to then make the only one.
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "devices.yaml", "secrets.yaml"]
+    # Both paths in the one warning, because a user looking for their backup at
+    # the normal path has to be told where the old bytes went.
+    err = capsys.readouterr().err.strip()
+    assert err.count("warning:") == 1
+    assert str(flash.backup_path()) in err
+    assert str(aside[0]) in err
+
+
+def test_backup_sets_aside_two_dead_archives_without_clobbering_either(tmp_path, monkeypatch):
+    # A fixed set-aside name, or a second-resolution timestamp, loses the first
+    # quarantined copy to the second. This project already has a documented
+    # same-minute collision (resolve_device's "registered less than a minute
+    # ago"), so the name is mkstemp-unique.
+    _local_data(tmp_path, monkeypatch)
+    _dead_archive(flash.backup_path(), "not a zip file")
+    flash.backup_local_data()
+    _dead_archive(flash.backup_path(), "also not a zip file")
+    flash.backup_local_data()
+
+    aside = _set_asides(flash.backup_path())
+    assert len(aside) == 2
+    assert sorted(p.read_text() for p in aside) == ["also not a zip file", "not a zip file"]
+
+
+def test_backup_neither_sets_aside_nor_writes_a_dead_archive_with_no_clocks(tmp_path, monkeypatch, capsys):
+    # The empty-registry guard runs before the set-aside, not after it: once
+    # the dead archive is out of the way there is nothing left to compare
+    # against, and a registry truncated to nothing would become the content of
+    # the fresh archive.
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    reg.write_text("")
+    _dead_archive(flash.backup_path())
+
+    flash.backup_local_data()
+
+    assert flash.backup_path().read_text() == "not a zip file"
+    assert _set_asides(flash.backup_path()) == []
+    err = capsys.readouterr().err
+    assert "keeping the existing safety backup" in err
+    assert str(flash.backup_path()) in err
+
+
+def test_backup_refuses_the_write_when_the_set_aside_fails(tmp_path, monkeypatch, capsys):
+    # Falling through to the write after a failed set-aside is the original
+    # data-loss bug with extra steps. The invariant is that some file in the
+    # backup directory holds the dead bytes at every instant.
+    _local_data(tmp_path, monkeypatch)
+    _dead_archive(flash.backup_path())
+    real_replace = flash.os.replace
+
+    def refuse_the_set_aside(src, dst):
+        if "unreadable" in str(dst):
+            raise OSError("cross-device link")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(flash.os, "replace", refuse_the_set_aside)
 
     flash.backup_local_data()
 
     assert flash.backup_path().read_text() == "not a zip file"
     err = capsys.readouterr().err
     assert "keeping the existing safety backup" in err
-    assert "delete it" in err
+    assert str(flash.backup_path()) in err
+
+
+def test_a_set_aside_that_outlives_a_failed_write_is_named_in_the_warning(tmp_path, monkeypatch, capsys):
+    # The acceptable half-way state: the bytes are quarantined and no fresh
+    # archive got written, so backup_path() is simply absent. A user told only
+    # "could not write the safety backup" would go looking at the normal path
+    # and find nothing at all.
+    _local_data(tmp_path, monkeypatch)
+    _dead_archive(flash.backup_path())
+    real_replace = flash.os.replace
+
+    def refuse_the_archive(src, dst):
+        if str(dst) == str(flash.backup_path()):
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(flash.os, "replace", refuse_the_archive)
+
+    flash.backup_local_data()
+
+    aside = _set_asides(flash.backup_path())
+    assert len(aside) == 1
+    assert aside[0].read_text() == "not a zip file"
+    assert not flash.backup_path().exists()
+    err = capsys.readouterr().err
+    # That line, not merely somewhere in the output: the set-aside warning
+    # above it already names the path, and it is the write failure the user
+    # will be reading when they go looking.
+    failure = [line for line in err.splitlines() if "could not write the safety backup" in line]
+    assert len(failure) == 1
+    assert str(aside[0]) in failure[0]
 
 
 def test_the_keep_the_old_archive_warnings_name_the_archive(tmp_path, monkeypatch, capsys):
@@ -839,6 +996,32 @@ def test_backup_writes_a_shorter_registry_when_the_dropped_clocks_secrets_went_t
     assert "rolled back" not in err
 
 
+def test_backup_keeps_the_old_archive_when_a_drop_hides_behind_two_new_clocks(tmp_path, monkeypatch, capsys):
+    # The guard is top level now, so it asks about dropped names whatever the
+    # count did - including a count that went up, which the old nesting could
+    # not see either: 2 archived against 3 here is not a shrink. The clock
+    # that went missing is no less missing for having been outnumbered.
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    clocks = _three_clocks()
+    extra = flash.Device("33:44:55:66:77:88", "clock-w", "Clock W", "2026-10-03")
+    flash.save_registry(reg, clocks[:2])
+    _secrets_for(sec, [d.name for d in clocks])
+    flash.backup_local_data()
+    before = flash.backup_path().read_bytes()
+    capsys.readouterr()
+
+    flash.save_registry(reg, [clocks[0], clocks[2], extra])
+    flash.backup_local_data()
+
+    assert flash.backup_path().read_bytes() == before
+    err = capsys.readouterr().err
+    assert "keeping the existing safety backup" in err
+    assert "clock-y" in err
+    assert "rolled back" in err
+    # Nothing shrank, so the shrink wording must stay out of it.
+    assert "down to" not in err
+
+
 def test_the_rollback_guard_is_silent_when_the_registry_grows_or_holds(tmp_path, monkeypatch, capsys):
     # An orphaned api_key_* on its own is not a rollback: the count has to
     # have gone down. clock-z is keyed in secrets throughout and never in the
@@ -859,21 +1042,59 @@ def test_the_rollback_guard_is_silent_when_the_registry_grows_or_holds(tmp_path,
         assert "clock-z" in z.read("devices.yaml").decode()
 
 
-def test_the_rollback_guard_does_not_fire_when_two_registries_merely_differ(tmp_path, monkeypatch, capsys):
-    # Same count, different names. Out of scope on purpose: the allowance this
-    # discriminates is the shrink allowance, and nothing has shrunk here.
+def test_backup_keeps_the_old_archive_when_a_rollback_kept_the_clock_count(tmp_path, monkeypatch, capsys):
+    # Found by the whole-branch review. The guard used to be nested inside the
+    # shrink warning, so a substitution that kept the count the same never
+    # reached it - and that fall-through wrote the archive with no guard and no
+    # warning at all, more quietly than the shrink it was guarding.
+    #
+    # No fault required: a scrapped clock-y was removed by hand and a new
+    # clock-z registered, so the registry and the archive hold {x, z} while
+    # secrets.yaml still keys x, y and z - nothing removes keys automatically.
+    # A checkout of a commit from before devices.yaml was untracked then puts
+    # {x, y} back in place. Same count, so the shrink comparison says nothing,
+    # and the archive used to become {x, y} - losing clock-z from both copies
+    # silently, and handing it a second identity on its next flash.
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    clocks = _three_clocks()
+    flash.save_registry(reg, [clocks[0], clocks[2]])
+    _secrets_for(sec, [d.name for d in clocks])
+    flash.backup_local_data()
+    before = flash.backup_path().read_bytes()
+    capsys.readouterr()
+
+    flash.save_registry(reg, clocks[:2])
+    flash.backup_local_data()
+
+    assert flash.backup_path().read_bytes() == before
+    err = capsys.readouterr().err
+    assert "keeping the existing safety backup" in err
+    assert str(flash.backup_path()) in err
+    assert "clock-z" in err
+    assert "rolled back" in err
+    # Nothing shrank, so claiming a shorter registry would be a lie here too.
+    assert "backing up the shorter registry" not in err
+
+
+def test_backup_writes_a_count_neutral_edit_when_the_dropped_clocks_secrets_went_too(tmp_path, monkeypatch, capsys):
+    # The legitimate shape of the same count change: clock-y was scrapped by
+    # hand, its api_key_* and ota_password_* went with it, and clock-z was
+    # registered. No witness left behind, so no guard, and - unlike the shrink
+    # allowance, which has a count to report - nothing worth saying either.
     reg, sec = _local_data(tmp_path, monkeypatch)
     clocks = _three_clocks()
     flash.save_registry(reg, clocks[:2])
-    _secrets_for(sec, [d.name for d in clocks])
+    _secrets_for(sec, ["clock-x", "clock-y"])
     flash.backup_local_data()
     capsys.readouterr()
 
     flash.save_registry(reg, [clocks[0], clocks[2]])
+    _secrets_for(sec, ["clock-x", "clock-z"])
     flash.backup_local_data()
 
     assert capsys.readouterr().err == ""
     with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "clock-z" in z.read("devices.yaml").decode()
         assert "clock-y" not in z.read("devices.yaml").decode()
 
 
