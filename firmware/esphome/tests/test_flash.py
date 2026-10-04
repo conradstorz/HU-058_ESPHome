@@ -416,10 +416,23 @@ def test_backup_path_is_the_named_archive_in_the_backup_dir(tmp_path, monkeypatc
     assert flash.ARCHIVE_NAME == "HU-058_clock_safety_backup_of_local_data.zip"
 
 
+@pytest.mark.real_backup_dir
 def test_backup_dir_is_outside_the_repository():
     assert flash.backup_dir().name == "HU-058_ESPHome"
     assert flash.HERE not in flash.backup_dir().parents
     assert flash.backup_dir() != flash.HERE
+
+
+def test_the_suite_never_resolves_the_real_backup_dir():
+    # The autouse fixture in conftest.py redirects backup_dir for every test.
+    # If this ever points into the user's profile again, a test run can
+    # overwrite their real clock registry backup with fixture data.
+    import platformdirs
+
+    real = Path(platformdirs.user_data_dir("HU-058_ESPHome", appauthor=False))
+
+    assert flash.backup_dir() != real
+    assert real not in flash.backup_dir().parents
 
 
 def test_local_data_paths_follow_the_module_constants(tmp_path, monkeypatch):
