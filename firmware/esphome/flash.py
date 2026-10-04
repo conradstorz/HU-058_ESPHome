@@ -510,6 +510,63 @@ def backup_local_data() -> None:
                 pass
 
 
+def restore_local_data() -> None:
+    """Put back any local data file that has gone missing.
+
+    Runs before the registry is read, because a missing registry makes
+    flash.py mint a fresh identity for a clock Home Assistant has already
+    paired and nothing downstream can tell that happened. Never raises, and
+    never overwrites a file that is still there.
+    """
+    archive = None
+    try:
+        archive = backup_path()
+        if not archive.exists():
+            return
+        paths = _local_data_paths()
+        restored: list[str] = []
+        with zipfile.ZipFile(archive) as z:
+            held = set(z.namelist())
+            for name, path in paths.items():
+                if path.exists() or name not in held:
+                    continue
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # Through a temporary file, because of the rule right above:
+                # writing the destination directly leaves a partial file if this
+                # is interrupted, and the next run would see a file that exists
+                # and refuse to restore over it. A half-written registry would
+                # block automatic recovery for good.
+                tmp = path.with_name(path.name + ".restoring")
+                try:
+                    tmp.write_bytes(z.read(name))
+                    os.replace(tmp, path)
+                finally:
+                    tmp.unlink(missing_ok=True)
+                restored.append(name)
+    except Exception as e:
+        if archive is None:
+            print(f"warning: could not read the safety backup: {e}", file=sys.stderr)
+        else:
+            print(f"warning: could not read the safety backup {archive}: {e}", file=sys.stderr)
+        return
+    if not restored:
+        return
+    for name in restored:
+        if name == "devices.yaml":
+            try:
+                n = len(load_registry(paths[name]))
+            except Exception:
+                print("Restored devices.yaml from the safety backup.")
+                continue
+            print(
+                f"Restored devices.yaml from the safety backup "
+                f"({n} {'clock' if n == 1 else 'clocks'})."
+            )
+        else:
+            print(f"Restored {name} from the safety backup.")
+    print(f"  {archive}")
+
+
 # --- resolution -------------------------------------------------------------
 
 def resolve_device(

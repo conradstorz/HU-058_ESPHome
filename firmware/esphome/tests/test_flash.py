@@ -650,6 +650,77 @@ def test_backup_warns_and_does_not_raise_when_the_backup_dir_cannot_be_resolved(
     assert "no data dir" in capsys.readouterr().err
 
 
+def test_restore_puts_back_a_missing_registry(tmp_path, monkeypatch, capsys):
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    reg.unlink()
+
+    flash.restore_local_data()
+
+    assert len(flash.load_registry(reg)) == 1
+    out = capsys.readouterr().out
+    assert "Restored devices.yaml" in out
+    assert "(1 clock)" in out
+    assert str(flash.backup_path()) in out
+
+
+def test_restore_puts_back_missing_secrets(tmp_path, monkeypatch, capsys):
+    _, sec = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    sec.unlink()
+
+    flash.restore_local_data()
+
+    assert "api_key_clock_x" in sec.read_text()
+    assert "Restored secrets.yaml" in capsys.readouterr().out
+
+
+def test_restore_never_overwrites_a_file_that_exists(tmp_path, monkeypatch, capsys):
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    sec.write_text("wifi_ssid: edited-since\n")
+
+    flash.restore_local_data()
+
+    assert sec.read_text() == "wifi_ssid: edited-since\n"
+    assert "Restored" not in capsys.readouterr().out
+
+
+def test_restore_leaves_no_temporary_file_behind(tmp_path, monkeypatch):
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    reg.unlink()
+
+    flash.restore_local_data()
+
+    assert reg.exists()
+    assert not [f for f in reg.parent.iterdir() if f.name.endswith(".restoring")]
+
+
+def test_restore_without_an_archive_says_nothing(tmp_path, monkeypatch, capsys):
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    reg.unlink()
+
+    flash.restore_local_data()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert not reg.exists()
+
+
+def test_restore_warns_on_an_archive_it_cannot_open(tmp_path, monkeypatch, capsys):
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    reg.unlink()
+    flash.backup_path().parent.mkdir(parents=True, exist_ok=True)
+    flash.backup_path().write_text("not a zip file")
+
+    flash.restore_local_data()
+
+    assert "warning" in capsys.readouterr().err
+    assert not reg.exists()
+
+
 # --- the build cache --------------------------------------------------------
 
 # ESPHome installs ccache with the ESP-IDF tools but resolves whether to use it
