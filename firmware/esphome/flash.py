@@ -391,6 +391,123 @@ def backup_readme(files: list[str], clocks: int | None) -> str:
     )
 
 
+def _archive_members(path: Path) -> set[str]:
+    """The data files an existing archive holds; empty when it cannot be read."""
+    if not path.exists():
+        return set()
+    try:
+        with zipfile.ZipFile(path) as z:
+            return {n for n in z.namelist() if n in BACKUP_MEMBERS}
+    except (OSError, zipfile.BadZipFile):
+        return set()
+
+
+def _archived_clocks(path: Path) -> int:
+    """How many clocks the archived registry holds; 0 when there is none."""
+    if not path.exists():
+        return 0
+    try:
+        with zipfile.ZipFile(path) as z:
+            if "devices.yaml" not in z.namelist():
+                return 0
+            raw = yaml.safe_load(z.read("devices.yaml").decode())
+    except Exception:
+        return 0
+    if not isinstance(raw, dict):
+        return 0
+    return len(raw.get("devices") or [])
+
+
+def _backup_candidates(paths: dict[str, Path]) -> list[tuple[str, Path]]:
+    """The data files worth archiving: present, and readable.
+
+    A file that will not parse is skipped rather than copied, so a truncated
+    registry cannot overwrite the last good copy of itself.
+    """
+    out: list[tuple[str, Path]] = []
+    for name, path in paths.items():
+        if not path.exists():
+            continue
+        try:
+            if name == "devices.yaml":
+                load_registry(path)
+            else:
+                yaml.safe_load(path.read_text())
+        except Exception as e:
+            # Deliberately broad. The probe's only question is whether this
+            # file is usable, and load_registry() raises KeyError on an entry
+            # truncated mid-write and ValueError on a mangled MAC, neither of
+            # which is a YAMLError. Letting one escape would crash the flash.
+            print(f"warning: not backing up {name}: {e}", file=sys.stderr)
+            continue
+        out.append((name, path))
+    return out
+
+
+def backup_local_data() -> None:
+    """Copy devices.yaml and secrets.yaml into the safety archive.
+
+    Never raises. Firmware getting onto the board matters more than the copy,
+    so every failure warns and returns.
+    """
+    target = backup_path()
+    tmp = target.with_name(target.name + ".tmp")
+    try:
+        candidates = _backup_candidates(_local_data_paths())
+        names = {n for n, _ in candidates}
+        # Any member the archive holds and this run does not is a loss. A
+        # proper-subset test is not enough: {secrets.yaml} against an archived
+        # {devices.yaml} is incomparable, passes, and destroys the only copy of
+        # the registry.
+        if lost := _archive_members(target) - names:
+            print(
+                f"warning: keeping the existing safety backup: it still holds "
+                f"{', '.join(sorted(lost))}, which is missing or unreadable here.",
+                file=sys.stderr,
+            )
+            return
+        if not candidates:
+            return
+        clocks = None
+        for name, path in candidates:
+            if name == "devices.yaml":
+                clocks = len(load_registry(path))
+        archived = _archived_clocks(target)
+        # A zero-byte devices.yaml is valid YAML and loads as no clocks at all,
+        # so truncation to nothing clears every check above with its member set
+        # intact.
+        if clocks == 0 and archived:
+            print(
+                "warning: keeping the existing safety backup: devices.yaml has no "
+                f"clocks and the backup holds {archived}.",
+                file=sys.stderr,
+            )
+            return
+        if clocks is not None and archived > clocks:
+            # Dropping a scrapped board's entry by hand is legitimate and has to
+            # reach the backup. It just says so on the way past.
+            print(
+                f"warning: devices.yaml is down to {clocks} from {archived} clocks "
+                "in the safety backup; backing up the shorter registry.",
+                file=sys.stderr,
+            )
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("README.md", backup_readme([n for n, _ in candidates], clocks))
+            for name, path in candidates:
+                z.write(path, name)
+        os.replace(tmp, target)
+        # Credentials: owner only. Close to a no-op on Windows, where the ACL on
+        # the user data directory is what applies.
+        os.chmod(target, 0o600)
+    except Exception as e:
+        print(f"warning: could not write the safety backup: {e}", file=sys.stderr)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 # --- resolution -------------------------------------------------------------
 
 def resolve_device(

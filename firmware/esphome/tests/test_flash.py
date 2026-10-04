@@ -1,4 +1,5 @@
 import os
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -458,6 +459,184 @@ def test_backup_readme_omits_the_count_when_there_is_no_registry(tmp_path, monke
 
     assert "clocks." not in body
     assert "`secrets.yaml`" in body
+
+
+def _local_data(tmp_path, monkeypatch, registry=True, secrets=True):
+    """Point the module constants at tmp_path and write valid files there."""
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path / "backup")
+    reg = tmp_path / "devices.yaml"
+    sec = tmp_path / "secrets.yaml"
+    monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(flash, "SECRETS_PATH", sec)
+    if registry:
+        flash.save_registry(reg, [flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03")])
+    if secrets:
+        sec.write_text("wifi_ssid: net\napi_key_clock_x: key\n")
+    return reg, sec
+
+
+def test_backup_writes_both_files_and_a_readme(tmp_path, monkeypatch):
+    _local_data(tmp_path, monkeypatch)
+
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "devices.yaml", "secrets.yaml"]
+        assert "clock-x" in z.read("devices.yaml").decode()
+        assert "api_key_clock_x" in z.read("secrets.yaml").decode()
+        assert "holds 1 clock." in z.read("README.md").decode()
+
+
+def test_backup_skips_a_registry_that_does_not_parse(tmp_path, monkeypatch, capsys):
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    reg.write_text("devices: [oh: no\n")
+
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "secrets.yaml"]
+    assert "devices.yaml" in capsys.readouterr().err
+
+
+def test_backup_skips_secrets_that_do_not_parse(tmp_path, monkeypatch, capsys):
+    _, sec = _local_data(tmp_path, monkeypatch)
+    sec.write_text("key: [unclosed\n")
+
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "devices.yaml"]
+    assert "secrets.yaml" in capsys.readouterr().err
+
+
+def test_backup_keeps_the_old_archive_rather_than_shrink_it(tmp_path, monkeypatch, capsys):
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    before = flash.backup_path().read_bytes()
+
+    reg.unlink()  # what a git pull did on 2026-10-03
+    flash.backup_local_data()
+
+    assert flash.backup_path().read_bytes() == before
+    assert "devices.yaml" in capsys.readouterr().err
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "devices.yaml" in z.namelist()
+
+
+def test_backup_rewrites_the_archive_when_nothing_is_missing(tmp_path, monkeypatch):
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+
+    flash.save_registry(reg, [
+        flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03"),
+        flash.Device("11:22:33:44:55:66", "clock-y", "Clock Y", "2026-10-03"),
+    ])
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "clock-y" in z.read("devices.yaml").decode()
+        assert "holds 2 clocks." in z.read("README.md").decode()
+
+
+def test_backup_rewrites_the_archive_when_a_file_is_added(tmp_path, monkeypatch):
+    # The guard fires on what the archive would lose, so gaining a file is fine.
+    reg, _ = _local_data(tmp_path, monkeypatch, registry=False)
+    flash.backup_local_data()
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "secrets.yaml"]
+
+    flash.save_registry(reg, [flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03")])
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "devices.yaml", "secrets.yaml"]
+
+
+def test_backup_keeps_the_old_archive_when_the_members_are_swapped(tmp_path, monkeypatch, capsys):
+    # {devices.yaml} archived and only {secrets.yaml} to hand: the sets are
+    # incomparable, so a proper-subset test would let this through.
+    reg, sec = _local_data(tmp_path, monkeypatch, secrets=False)
+    flash.backup_local_data()
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "devices.yaml"]
+
+    reg.unlink()
+    sec.write_text("wifi_ssid: net\n")
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "devices.yaml" in z.namelist()
+    assert "devices.yaml" in capsys.readouterr().err
+
+
+def test_backup_skips_a_registry_truncated_mid_entry(tmp_path, monkeypatch, capsys):
+    # Valid YAML, then KeyError out of load_registry. Must not escape.
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    reg.write_text("devices:\n- mac: 20:50:0d:17:f4:58\n  name: wifi-clock\n")
+
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "secrets.yaml"]
+    assert "devices.yaml" in capsys.readouterr().err
+
+
+def test_backup_keeps_the_old_archive_when_the_registry_is_emptied(tmp_path, monkeypatch, capsys):
+    # A zero-byte registry is valid YAML and loads as no clocks at all, so the
+    # member set is unchanged and the parse probe passes it.
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    before = flash.backup_path().read_bytes()
+
+    reg.write_text("")
+    flash.backup_local_data()
+
+    assert flash.backup_path().read_bytes() == before
+    assert "no clocks" in capsys.readouterr().err
+
+
+def test_backup_writes_a_shorter_registry_and_warns(tmp_path, monkeypatch, capsys):
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.save_registry(reg, [
+        flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03"),
+        flash.Device("11:22:33:44:55:66", "clock-y", "Clock Y", "2026-10-03"),
+    ])
+    flash.backup_local_data()
+
+    flash.save_registry(reg, [flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03")])
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "clock-y" not in z.read("devices.yaml").decode()
+    assert "down to 1 from 2 clocks" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes; Windows uses the profile ACL")
+def test_backup_is_readable_only_by_its_owner(tmp_path, monkeypatch):
+    _local_data(tmp_path, monkeypatch)
+
+    flash.backup_local_data()
+
+    assert flash.backup_path().stat().st_mode & 0o777 == 0o600
+    assert flash.backup_path().parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_backup_leaves_no_temporary_file_behind(tmp_path, monkeypatch):
+    _local_data(tmp_path, monkeypatch)
+
+    flash.backup_local_data()
+
+    assert [p.name for p in flash.backup_path().parent.iterdir()] == [flash.ARCHIVE_NAME]
+
+
+def test_backup_warns_and_does_not_raise_when_it_cannot_write(tmp_path, monkeypatch, capsys):
+    _local_data(tmp_path, monkeypatch)
+    blocker = tmp_path / "backup"
+    blocker.write_text("")  # a file where the directory needs to be
+
+    flash.backup_local_data()
+
+    assert "warning" in capsys.readouterr().err
 
 
 # --- the build cache --------------------------------------------------------
