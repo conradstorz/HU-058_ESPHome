@@ -330,6 +330,28 @@ def backup_path() -> Path:
     return backup_dir() / ARCHIVE_NAME
 
 
+def _archive_written(path: Path) -> str | None:
+    """The archive's own last-write date, for an informational aside only.
+
+    Taken from stat() rather than the README's own `Written:` line: simpler,
+    always available even on an archive whose zip structure will not open at
+    all (stat() asks the filesystem, not the zip), and it is what os.replace()
+    actually preserves across a rewrite - the README's stamp lives inside the
+    member data and would need the zip opened to read, which is one more way
+    for this to fail right where it must not. The two can disagree (the
+    README's is UTC, this is local, and a hand-copied archive carries its
+    copy time instead of its write time); that is acceptable for a date meant
+    to prompt "go look at this", not to settle anything on its own.
+
+    None on any failure. The caller folds that into "no date to show" and
+    never into a reason to refuse.
+    """
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
 def _local_data_paths() -> dict[str, Path]:
     """Archive member name -> where that file lives in this checkout.
 
@@ -554,7 +576,18 @@ def _set_aside_dead_archive(target: Path) -> Path:
     fd, name = tempfile.mkstemp(dir=target.parent, prefix=ARCHIVE_NAME + ".unreadable-", suffix=".zip")
     os.close(fd)
     aside = Path(name)
-    os.replace(target, aside)
+    try:
+        os.replace(target, aside)
+    except OSError:
+        # mkstemp's empty file is dead weight the moment the replace fails,
+        # and a stray *.unreadable-*.zip that is really empty invites exactly
+        # the "unzip what you can from it" the README promises, and finds
+        # nothing - evidence the file lost bytes it never held.
+        try:
+            aside.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     # After the replace, not before: the rename gives this path the dead
     # file's inode and therefore its mode, not mkstemp's. Usually already
     # 0600, but an archive mangled by a third party can carry any mode, and
@@ -577,6 +610,16 @@ def backup_local_data() -> None:
     try:
         target = backup_path()
         existing, archived_names = _archive_state(target)
+        # Only for the four refusals below where the zip itself opened, so the
+        # date really is when this archive was last written rather than when
+        # something unreadable happened to it. Computed once regardless of
+        # which path is taken - it is a single stat() call, cheap even on the
+        # paths that never use it.
+        target_desc = (
+            f"{target} (written {written})"
+            if (written := _archive_written(target)) is not None
+            else str(target)
+        )
         paths = _local_data_paths()
         candidates = _backup_candidates(paths)
         names = {n for n, _ in candidates}
@@ -586,8 +629,8 @@ def backup_local_data() -> None:
         # the registry.
         if lost := existing - names:
             print(
-                f"warning: keeping the existing safety backup {target}: it still holds "
-                f"{', '.join(sorted(lost))}, which is missing or unreadable here.",
+                f"warning: keeping the existing safety backup {target_desc}: it still "
+                f"holds {', '.join(sorted(lost))}, which is missing or unreadable here.",
                 file=sys.stderr,
             )
             return
@@ -614,8 +657,8 @@ def backup_local_data() -> None:
                 # would be written and the only copy of the keys would live in
                 # a quarantined file the tool cannot read.
                 print(
-                    f"warning: keeping the existing safety backup {target}: it cannot be "
-                    "read, so there is no telling what overwriting it would lose. Unzip "
+                    f"warning: keeping the existing safety backup {target_desc}: it cannot "
+                    "be read, so there is no telling what overwriting it would lose. Unzip "
                     "what you can from it, then delete it and the next run will write a "
                     "fresh one.",
                     file=sys.stderr,
@@ -663,7 +706,7 @@ def backup_local_data() -> None:
         # intact.
         if clocks == 0 and archived:
             print(
-                f"warning: keeping the existing safety backup {target}: devices.yaml "
+                f"warning: keeping the existing safety backup {target_desc}: devices.yaml "
                 f"has no clocks and the backup holds {archived}.",
                 file=sys.stderr,
             )
@@ -677,8 +720,8 @@ def backup_local_data() -> None:
         if registry is not None:
             if stale := _stale_dropped_clocks(archived_names, registry, paths["secrets.yaml"]):
                 print(
-                    f"warning: keeping the existing safety backup {target}: its registry "
-                    f"holds {', '.join(stale)}, devices.yaml here does not, and "
+                    f"warning: keeping the existing safety backup {target_desc}: its "
+                    f"registry holds {', '.join(stale)}, devices.yaml here does not, and "
                     "secrets.yaml still holds their API keys. That reads as a registry "
                     "rolled back rather than edited - a git checkout of a commit from "
                     "before devices.yaml was untracked overwrites it in place - so the "
@@ -831,19 +874,29 @@ def restore_local_data() -> None:
             print(f"warning: could not read the safety backup {archive}: {e}", file=sys.stderr)
     if not restored:
         return
+    # Named here, not folded silently into the per-file messages below: the
+    # rollback guard in backup_local_data() can leave the archive unwritten
+    # for weeks while new clocks keep getting registered, and a restore that
+    # only says what it put back - never how old it is - hides exactly that.
+    # A user who sees "written 2026-08-14" today has a reason to go check
+    # devices.yaml; one who sees only "restored" does not.
+    written = _archive_written(archive)
+    written_part = f"written {written}" if written is not None else ""
+
+    def _detail(*parts: str) -> str:
+        bits = [p for p in parts if p]
+        return f" ({', '.join(bits)})" if bits else ""
+
     for name in restored:
         if name == "devices.yaml":
             try:
                 n = len(load_registry(paths[name]))
+                count_part = f"{n} {'clock' if n == 1 else 'clocks'}"
             except Exception:
-                print("Restored devices.yaml from the safety backup.")
-                continue
-            print(
-                f"Restored devices.yaml from the safety backup "
-                f"({n} {'clock' if n == 1 else 'clocks'})."
-            )
+                count_part = ""
+            print(f"Restored devices.yaml from the safety backup{_detail(count_part, written_part)}.")
         else:
-            print(f"Restored {name} from the safety backup.")
+            print(f"Restored {name} from the safety backup{_detail(written_part)}.")
     print(f"  {archive}")
 
 

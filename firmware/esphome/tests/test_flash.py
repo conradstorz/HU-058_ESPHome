@@ -859,6 +859,11 @@ def test_backup_refuses_the_write_when_the_set_aside_fails(tmp_path, monkeypatch
     err = capsys.readouterr().err
     assert "keeping the existing safety backup" in err
     assert str(flash.backup_path()) in err
+    # S2: mkstemp's empty set-aside file must not survive a replace that
+    # failed on it - a stray *.unreadable-*.zip with nothing inside invites
+    # the README's "unzip what you can from it" and finds nothing, which
+    # reads as lost bytes rather than a file that was never written to.
+    assert _set_asides(flash.backup_path()) == []
 
 
 def test_a_set_aside_that_outlives_a_failed_write_is_named_in_the_warning(tmp_path, monkeypatch, capsys):
@@ -1023,9 +1028,11 @@ def test_backup_keeps_the_old_archive_when_a_drop_hides_behind_two_new_clocks(tm
 
 
 def test_the_rollback_guard_is_silent_when_the_registry_grows_or_holds(tmp_path, monkeypatch, capsys):
-    # An orphaned api_key_* on its own is not a rollback: the count has to
-    # have gone down. clock-z is keyed in secrets throughout and never in the
-    # registry until the last step.
+    # Silent here because nothing was dropped - the guard fires on a name the
+    # archive holds and the registry does not, and there is no such name to
+    # testify about. clock-z is keyed in secrets throughout and never in the
+    # registry until the last step, which is an orphaned api_key_* on its own
+    # and, on purpose, not what the guard is watching for.
     reg, sec = _local_data(tmp_path, monkeypatch)
     clocks = _three_clocks()
     flash.save_registry(reg, clocks[:2])
@@ -1256,8 +1263,95 @@ def test_restore_puts_back_a_missing_registry(tmp_path, monkeypatch, capsys):
     assert len(flash.load_registry(reg)) == 1
     out = capsys.readouterr().out
     assert "Restored devices.yaml" in out
-    assert "(1 clock)" in out
+    # Not "(1 clock)" verbatim: the archive's age now rides in the same
+    # parenthetical (test_restore_names_the_archives_age below), so this only
+    # pins the count.
+    assert "1 clock" in out
     assert str(flash.backup_path()) in out
+
+
+def test_restore_names_the_archives_age(tmp_path, monkeypatch, capsys):
+    # S1: the rollback guard in backup_local_data() can leave the archive
+    # unwritten for weeks while new clocks keep getting registered. A restore
+    # that only says what it put back, never how old it is, hides exactly
+    # that - so the message has to carry the archive's own write date.
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    old = datetime(2026, 8, 14, 12, 0, 0).timestamp()
+    os.utime(flash.backup_path(), (old, old))
+    reg.unlink()
+    sec.unlink()
+
+    flash.restore_local_data()
+
+    out = capsys.readouterr().out
+    assert out.count("written 2026-08-14") == 2  # devices.yaml and secrets.yaml
+
+
+def test_archive_written_degrades_to_none_when_stat_fails(tmp_path, monkeypatch):
+    # The unit-level half of S1's robustness requirement: stat() failing must
+    # not raise out of the helper, only degrade to "no date to show".
+    archive = tmp_path / "archive.zip"
+    archive.write_text("not a real zip, stat still has to work on it")
+    monkeypatch.setattr(
+        Path, "stat", lambda self, *a, **k: (_ for _ in ()).throw(OSError("denied"))
+    )
+
+    assert flash._archive_written(archive) is None
+
+
+def test_restore_still_reports_the_restore_when_the_archives_date_is_unreadable(
+    tmp_path, monkeypatch, capsys
+):
+    # The integration-level half: restore_local_data() must not raise or lose
+    # the restored-files report just because the archive's age could not be
+    # read. A counting patch lets the one stat() call restore_local_data()
+    # itself needs (archive.exists()) through, and fails only the later one
+    # _archive_written() makes - proving the degrade path is actually taken
+    # rather than the function returning early with nothing restored at all.
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    reg.unlink()
+    archive = flash.backup_path()
+    real_stat = Path.stat
+    calls = {"n": 0}
+
+    def flaky_stat(self, *a, **kw):
+        if self == archive:
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise OSError("denied")
+        return real_stat(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    flash.restore_local_data()
+
+    assert len(flash.load_registry(reg)) == 1
+    out = capsys.readouterr().out
+    assert "Restored devices.yaml" in out
+    assert "1 clock" in out
+    assert "written" not in out
+    assert calls["n"] > 1  # the degraded path, not a vacuous early return
+
+
+def test_the_keep_the_old_archive_warnings_name_the_archives_age(tmp_path, monkeypatch, capsys):
+    # One of the four refusals the date was mirrored into - the loss guard.
+    # The other three (central-directory-parsed-but-damaged-member, the
+    # registry-emptied guard, and the rollback guard) share the same
+    # target_desc plumbing, so this is the representative case.
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    old = datetime(2026, 8, 14, 12, 0, 0).timestamp()
+    os.utime(flash.backup_path(), (old, old))
+
+    reg.unlink()
+    flash.backup_local_data()
+
+    err = capsys.readouterr().err
+    assert "keeping the existing safety backup" in err
+    assert str(flash.backup_path()) in err
+    assert "written 2026-08-14" in err
 
 
 def test_restore_puts_back_missing_secrets(tmp_path, monkeypatch, capsys):
