@@ -73,6 +73,18 @@ password and the WiFi password, so it carries the same exposure as
 `secrets.yaml` already does: acceptable under the user's own profile, not
 something to sync, attach or share. The generated `README.md` says so.
 
+Unencrypted is not the same as unprotected, and the default modes are not good
+enough for a file full of credentials. On a POSIX host a `022` umask leaves the
+directory `0755` and the archive `0644`, readable by any local user who can
+traverse the home directory. So the directory is created `0o700` and the
+archive is chmodded `0o600` once written, best effort: on Windows `chmod` is
+close to a no-op and the per-user ACL on `%LOCALAPPDATA%` is what actually
+applies.
+
+`platformdirs` becomes a direct dependency in `pyproject.toml`. It is present
+today only as an ESPHome transitive dependency, which would leave `flash.py`
+breaking on an upstream dependency change it has nothing to do with.
+
 ## Backup
 
 Called from `main()` immediately after `resolve_device()` returns, before the
@@ -81,19 +93,34 @@ final at that point, so a flash that fails at the upload stage still leaves a
 backup.
 
 1. Collect the data files. Each of `devices.yaml` and `secrets.yaml` is included
-   only if it exists and parses — `load_registry()` for the registry, a
-   `yaml.safe_load` for the secrets. A file that will not parse is skipped, so a
-   truncated registry cannot overwrite the last good copy of itself.
-2. **Shrink guard.** If an archive already exists and the set of data files
-   about to be written is a proper subset of the set it already holds, keep the
-   existing archive and warn. This is the accident of 2026-10-03 exactly: a pull
-   eats `devices.yaml`, and the next flash would otherwise replace a two-file
-   archive with a one-file one and destroy the only remaining copy of the file
-   that was just lost. The comparison is over data files only; `README.md` is
+   only if it exists and is usable - `load_registry()` for the registry, a
+   `yaml.safe_load` for the secrets. **Any** exception from that probe counts as
+   unusable, not just `yaml.YAMLError`: a registry truncated mid-entry parses as
+   YAML and then raises `KeyError: 'friendly_name'` out of `load_registry()`, and
+   a mangled MAC raises `ValueError` out of `normalize_mac()`. A file that fails
+   the probe is skipped rather than copied, so a damaged registry cannot
+   overwrite the last good copy of itself.
+2. **Loss guard.** If an archive already exists and holds any data file that is
+   not among the candidates, keep the existing archive and warn. A proper-subset
+   test is not enough: with `{devices.yaml}` archived and only `{secrets.yaml}`
+   to hand the two sets are incomparable, a subset test passes, and the sole copy
+   of the registry is destroyed. The test is therefore `existing - candidates`
+   being non-empty, which also covers the 2026-10-03 accident: a pull eats
+   `devices.yaml` and the next flash would otherwise replace a two-file archive
+   with a one-file one. The comparison is over data files only; `README.md` is
    always present and would mask the loss.
-3. Generate `README.md` (below).
-4. Write to a temporary file in the same directory, then `os.replace()` it over
-   the archive, so an interrupted run cannot leave a half-written archive.
+3. **Empty-registry guard.** A zero-byte `devices.yaml` is valid YAML and
+   `load_registry()` returns `[]` for it (`flash.py:123-145`), so truncation to
+   nothing survives both guards above with its member set intact. If the
+   candidate registry holds no clocks and the archived one holds some, keep the
+   existing archive and warn. A registry that merely holds *fewer* clocks is
+   still written, with a warning naming the drop: removing a scrapped board's
+   entry by hand is a legitimate edit and has to reach the backup, and a partial
+   truncation that is not total fails the probe in step 1 anyway.
+4. Generate `README.md` (below).
+5. Write to a temporary file in the same directory, then `os.replace()` it over
+   the archive, so an interrupted run cannot leave a half-written archive, and
+   `chmod` the result `0o600`.
 
 A backup failure never fails a flash. It prints a warning and the run continues:
 firmware getting onto the board matters more than the copy. A missing user data
@@ -107,8 +134,18 @@ Called from `main()` before the registry is read, ahead of the backup.
    unopenable, otherwise say nothing. A missing archive is a first run, not an
    error.
 2. For each of `devices.yaml` and `secrets.yaml`: if the file is missing locally
-   and the member is present in the archive, extract it into
-   `firmware/esphome/`. A file that exists locally is never overwritten.
+   and the member is present in the archive, write it to a temporary file beside
+   its destination and `os.replace()` it into position. A file that exists
+   locally is never overwritten.
+
+   The temporary file matters more here than in the backup, because of the rule
+   right before it. Writing the destination directly leaves a partial file if the
+   run is interrupted or the disk fills, and the next run sees a file that exists
+   and refuses to restore over it - so a half-written registry would block
+   automatic recovery permanently. Promotion uses `os.replace()` rather than a
+   link-based no-clobber rename: the destination was checked moments earlier, in
+   a tool a person runs interactively, so the race is not worth the portability
+   cost of `os.link()`.
 3. Print which files were restored and, when the registry was among them, how
    many clocks it holds:
 
@@ -142,7 +179,7 @@ live and the only place that launches a flash.
 
 | Function | Purpose |
 |----------|---------|
-| `backup_dir() -> Path` | The user data directory. The seam the tests redirect. |
+| `backup_dir() -> Path` | The user data directory, created `0o700`. The seam the tests redirect. |
 | `backup_path() -> Path` | `backup_dir() / ARCHIVE_NAME`. |
 | `backup_readme(files, clocks) -> str` | The generated `README.md` body. |
 | `backup_local_data() -> None` | Steps 1-4 above. Warns, never raises. |
@@ -162,19 +199,31 @@ In `firmware/esphome/tests/test_flash.py`, with `backup_dir` monkeypatched to a
 3. A registry that does not parse is skipped, and the rest of the archive is
    still written.
 4. Secrets that do not parse are skipped the same way.
-5. The shrink guard keeps the existing archive and warns when a data file has
+5. The loss guard keeps the existing archive and warns when a data file has
    gone missing since the last backup.
-6. The shrink guard does not fire when the data files are unchanged, nor when a
+6. The loss guard keeps the existing archive when the members are swapped -
+   `{devices.yaml}` archived, only `{secrets.yaml}` to hand - which a
+   proper-subset test would let through.
+7. The loss guard does not fire when the data files are unchanged, nor when a
    file is added.
-7. `restore_local_data()` restores a missing `devices.yaml`.
-8. It restores a missing `secrets.yaml`.
-9. It leaves a file that exists on disk untouched.
-10. A missing archive restores nothing and does not warn.
-11. An unopenable archive warns and restores nothing.
-12. A backup failure (unwritable directory) leaves the flash's exit code
+8. A registry truncated mid-entry, which raises `KeyError` rather than
+   `yaml.YAMLError`, is skipped and does not escape as an exception.
+9. The empty-registry guard keeps the existing archive when `devices.yaml` is
+   zero bytes and the archive holds clocks.
+10. A registry holding fewer clocks than the archived one is still written, and
+    warns.
+11. The archive is created `0o600` and its directory `0o700` on POSIX.
+12. `restore_local_data()` restores a missing `devices.yaml`.
+13. It restores a missing `secrets.yaml`.
+14. It leaves a file that exists on disk untouched.
+15. A missing archive restores nothing and does not warn.
+16. An unopenable archive warns and restores nothing.
+17. A restore leaves no temporary file behind, and a restore that fails part-way
+    leaves no partial destination for the next run to trip over.
+18. A backup failure (unwritable directory) leaves the flash's exit code
     untouched.
-13. The generated `README.md` names the archive's own path and the clock count.
-14. The archive is written atomically: no temporary file is left behind.
+19. The generated `README.md` names the archive's own path and the clock count.
+20. The archive is written atomically: no temporary file is left behind.
 
 ## Out of scope
 

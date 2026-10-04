@@ -17,6 +17,13 @@ Spec: `docs/superpowers/specs/2026-10-03-local-data-safety-backup-design.md`
 - `BACKUP_MEMBERS = ("devices.yaml", "secrets.yaml")` — archive member names are these literals, whatever `REGISTRY_PATH` and `SECRETS_PATH` are pointed at.
 - The archive directory is `platformdirs.user_data_dir("HU-058_ESPHome", appauthor=False)`.
 - One rolling copy. No history, no rotation, no encryption.
+- `platformdirs` is a direct dependency in `pyproject.toml`, not borrowed from
+  ESPHome's transitive tree.
+- The archive is `0o600` and its directory `0o700`. Best effort: `chmod` barely
+  applies on Windows, where the per-user ACL on `%LOCALAPPDATA%` is what does.
+- The usability probe on a data file treats **any** exception as unusable, not
+  just `yaml.YAMLError`. A registry truncated mid-entry raises `KeyError` out of
+  `load_registry()`, and a mangled MAC raises `ValueError`.
 - `backup_local_data()` and `restore_local_data()` must never raise. Every failure path prints `warning: ...` to stderr and returns.
 - An existing local file is never overwritten by a restore.
 - Python via `uv` only: `uv sync`, `uv run pytest`, `uv run flash.py`. Never `pip install` or activate a venv.
@@ -92,7 +99,28 @@ def test_local_data_paths_follow_the_module_constants(tmp_path, monkeypatch):
 Run: `uv run pytest tests/test_flash.py -k "backup_path or backup_dir or local_data_paths" -v`
 Expected: FAIL with `AttributeError: module 'flash' has no attribute 'ARCHIVE_NAME'`
 
-- [ ] **Step 3: Add the imports**
+- [ ] **Step 3: Add the imports and declare `platformdirs`**
+
+In `firmware/esphome/pyproject.toml`, add `platformdirs` to `dependencies` so it
+reads:
+
+```toml
+dependencies = [
+    "esphome>=2026.9.0",
+    "esptool>=5.0",
+    "platformdirs>=4.0",
+    "pyserial>=3.5",
+    "pyyaml>=6.0",
+]
+```
+
+It is installed today only because ESPHome depends on it. `flash.py` is about to
+import it directly, and an upstream dependency change would otherwise break a
+tool that has nothing to do with the change. Then refresh the lockfile:
+
+Run: `uv lock`
+Expected: `Resolved N packages`, and `uv.lock` gains nothing but a
+`platformdirs` entry already present as a transitive pin.
 
 In `flash.py`, change the import block so it reads:
 
@@ -174,6 +202,10 @@ on the way back, and git clean -xdf removes them outright.
 backup_dir() is therefore outside the working tree, in the per-user data
 directory, which is the only place git cannot reach. The member names are
 fixed literals so an archive written by one clone restores into another.
+
+platformdirs becomes a direct dependency rather than one borrowed from
+ESPHome's transitive tree, so an upstream dependency change cannot break a
+tool that has nothing to do with it.
 
 Created for Conrad Storz with the help of Claude Code (conradstorz@gmail.com)
 MSGEOF
@@ -422,7 +454,7 @@ def test_backup_rewrites_the_archive_when_nothing_is_missing(tmp_path, monkeypat
 
 
 def test_backup_rewrites_the_archive_when_a_file_is_added(tmp_path, monkeypatch):
-    # The guard is a proper-subset test, so gaining a file must not trip it.
+    # The guard fires on what the archive would lose, so gaining a file is fine.
     reg, _ = _local_data(tmp_path, monkeypatch, registry=False)
     flash.backup_local_data()
     with zipfile.ZipFile(flash.backup_path()) as z:
@@ -433,6 +465,75 @@ def test_backup_rewrites_the_archive_when_a_file_is_added(tmp_path, monkeypatch)
 
     with zipfile.ZipFile(flash.backup_path()) as z:
         assert sorted(z.namelist()) == ["README.md", "devices.yaml", "secrets.yaml"]
+
+
+def test_backup_keeps_the_old_archive_when_the_members_are_swapped(tmp_path, monkeypatch, capsys):
+    # {devices.yaml} archived and only {secrets.yaml} to hand: the sets are
+    # incomparable, so a proper-subset test would let this through.
+    reg, sec = _local_data(tmp_path, monkeypatch, secrets=False)
+    flash.backup_local_data()
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "devices.yaml"]
+
+    reg.unlink()
+    sec.write_text("wifi_ssid: net\n")
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "devices.yaml" in z.namelist()
+    assert "devices.yaml" in capsys.readouterr().err
+
+
+def test_backup_skips_a_registry_truncated_mid_entry(tmp_path, monkeypatch, capsys):
+    # Valid YAML, then KeyError out of load_registry. Must not escape.
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    reg.write_text("devices:\n- mac: 20:50:0d:17:f4:58\n  name: wifi-clock\n")
+
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "secrets.yaml"]
+    assert "devices.yaml" in capsys.readouterr().err
+
+
+def test_backup_keeps_the_old_archive_when_the_registry_is_emptied(tmp_path, monkeypatch, capsys):
+    # A zero-byte registry is valid YAML and loads as no clocks at all, so the
+    # member set is unchanged and the parse probe passes it.
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    before = flash.backup_path().read_bytes()
+
+    reg.write_text("")
+    flash.backup_local_data()
+
+    assert flash.backup_path().read_bytes() == before
+    assert "no clocks" in capsys.readouterr().err
+
+
+def test_backup_writes_a_shorter_registry_and_warns(tmp_path, monkeypatch, capsys):
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.save_registry(reg, [
+        flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03"),
+        flash.Device("11:22:33:44:55:66", "clock-y", "Clock Y", "2026-10-03"),
+    ])
+    flash.backup_local_data()
+
+    flash.save_registry(reg, [flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03")])
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "clock-y" not in z.read("devices.yaml").decode()
+    assert "down to 1 from 2 clocks" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes; Windows uses the profile ACL")
+def test_backup_is_readable_only_by_its_owner(tmp_path, monkeypatch):
+    _local_data(tmp_path, monkeypatch)
+
+    flash.backup_local_data()
+
+    assert flash.backup_path().stat().st_mode & 0o777 == 0o600
+    assert flash.backup_path().parent.stat().st_mode & 0o777 == 0o700
 
 
 def test_backup_leaves_no_temporary_file_behind(tmp_path, monkeypatch):
@@ -476,6 +577,22 @@ def _archive_members(path: Path) -> set[str]:
         return set()
 
 
+def _archived_clocks(path: Path) -> int:
+    """How many clocks the archived registry holds; 0 when there is none."""
+    if not path.exists():
+        return 0
+    try:
+        with zipfile.ZipFile(path) as z:
+            if "devices.yaml" not in z.namelist():
+                return 0
+            raw = yaml.safe_load(z.read("devices.yaml").decode())
+    except Exception:
+        return 0
+    if not isinstance(raw, dict):
+        return 0
+    return len(raw.get("devices") or [])
+
+
 def _backup_candidates(paths: dict[str, Path]) -> list[tuple[str, Path]]:
     """The data files worth archiving: present, and readable.
 
@@ -491,7 +608,11 @@ def _backup_candidates(paths: dict[str, Path]) -> list[tuple[str, Path]]:
                 load_registry(path)
             else:
                 yaml.safe_load(path.read_text())
-        except (FlashError, OSError, yaml.YAMLError) as e:
+        except Exception as e:
+            # Deliberately broad. The probe's only question is whether this
+            # file is usable, and load_registry() raises KeyError on an entry
+            # truncated mid-write and ValueError on a mangled MAC, neither of
+            # which is a YAMLError. Letting one escape would crash the flash.
             print(f"warning: not backing up {name}: {e}", file=sys.stderr)
             continue
         out.append((name, path))
@@ -509,12 +630,14 @@ def backup_local_data() -> None:
     try:
         candidates = _backup_candidates(_local_data_paths())
         names = {n for n, _ in candidates}
-        existing = _archive_members(target)
-        if names < existing:
-            lost = ", ".join(sorted(existing - names))
+        # Any member the archive holds and this run does not is a loss. A
+        # proper-subset test is not enough: {secrets.yaml} against an archived
+        # {devices.yaml} is incomparable, passes, and destroys the only copy of
+        # the registry.
+        if lost := _archive_members(target) - names:
             print(
-                f"warning: keeping the existing safety backup: it still holds {lost}, "
-                "which is missing or unreadable here.",
+                f"warning: keeping the existing safety backup: it still holds "
+                f"{', '.join(sorted(lost))}, which is missing or unreadable here.",
                 file=sys.stderr,
             )
             return
@@ -524,13 +647,35 @@ def backup_local_data() -> None:
         for name, path in candidates:
             if name == "devices.yaml":
                 clocks = len(load_registry(path))
-        target.parent.mkdir(parents=True, exist_ok=True)
+        archived = _archived_clocks(target)
+        # A zero-byte devices.yaml is valid YAML and loads as no clocks at all,
+        # so truncation to nothing clears every check above with its member set
+        # intact.
+        if clocks == 0 and archived:
+            print(
+                "warning: keeping the existing safety backup: devices.yaml has no "
+                f"clocks and the backup holds {archived}.",
+                file=sys.stderr,
+            )
+            return
+        if clocks is not None and archived > clocks:
+            # Dropping a scrapped board's entry by hand is legitimate and has to
+            # reach the backup. It just says so on the way past.
+            print(
+                f"warning: devices.yaml is down to {clocks} from {archived} clocks "
+                "in the safety backup; backing up the shorter registry.",
+                file=sys.stderr,
+            )
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("README.md", backup_readme([n for n, _ in candidates], clocks))
             for name, path in candidates:
                 z.write(path, name)
         os.replace(tmp, target)
-    except (OSError, FlashError, zipfile.BadZipFile) as e:
+        # Credentials: owner only. Close to a no-op on Windows, where the ACL on
+        # the user data directory is what applies.
+        os.chmod(target, 0o600)
+    except Exception as e:
         print(f"warning: could not write the safety backup: {e}", file=sys.stderr)
         try:
             tmp.unlink(missing_ok=True)
@@ -541,7 +686,7 @@ def backup_local_data() -> None:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/test_flash.py -v`
-Expected: PASS, 96 passed
+Expected: PASS, 101 passed
 
 - [ ] **Step 5: Commit**
 
@@ -551,19 +696,34 @@ git commit -F - <<'MSGEOF'
 Write the clock registry and secrets to a safety archive
 
 One rolling zip, written to a temporary file and os.replace()d into position
-so an interrupted run cannot leave half an archive.
+so an interrupted run cannot leave half an archive, then chmodded 0o600: it
+holds every clock's API key and OTA password, and a 022 umask would otherwise
+leave it 0644 for any local user who can reach the home directory.
 
-Two guards earn their keep. A file that will not parse is skipped rather than
-copied, so a truncated registry cannot overwrite the last good copy of
-itself. And an archive is never allowed to shrink: if the files to hand are a
-proper subset of what the archive already holds, the old archive stays and
-the run warns. That second guard is the accident of 2026-10-03 exactly - a
-pull ate devices.yaml, and the next flash would otherwise have replaced a
-two-file backup with a one-file one and destroyed the only remaining copy of
-the file that had just been lost.
+Three guards earn their keep, and the first two exist because the obvious
+versions of them do not work.
 
-The comparison is over data files only. README.md is always present and would
-mask the loss.
+A file that fails its usability probe is skipped rather than copied. The probe
+catches every exception, not just YAMLError, because a registry truncated
+mid-entry is valid YAML and raises KeyError out of load_registry() - which
+would have escaped backup_local_data() and taken the flash down with it.
+
+An archive never loses a member: if it holds any data file this run does not,
+the old archive stays and the run warns. A proper-subset test is not enough,
+because {secrets.yaml} against an archived {devices.yaml} is incomparable,
+passes, and destroys the only copy of the registry. The comparison is over
+data files only - README.md is always present and would mask the loss.
+
+And a zero-byte devices.yaml is valid YAML that loads as no clocks at all, so
+total truncation clears both of those with its member set intact. An empty
+registry never replaces an archive that holds clocks. A merely shorter one
+does, with a warning: dropping a scrapped board's entry by hand is a
+legitimate edit and has to reach the backup.
+
+The accident of 2026-10-03 is the second guard's case exactly - a pull ate
+devices.yaml, and the next flash would otherwise have replaced a two-file
+backup with a one-file one and destroyed the only remaining copy of the file
+that had just been lost.
 
 Created for Conrad Storz with the help of Claude Code (conradstorz@gmail.com)
 MSGEOF
@@ -622,6 +782,17 @@ def test_restore_never_overwrites_a_file_that_exists(tmp_path, monkeypatch, caps
     assert "Restored" not in capsys.readouterr().out
 
 
+def test_restore_leaves_no_temporary_file_behind(tmp_path, monkeypatch):
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    reg.unlink()
+
+    flash.restore_local_data()
+
+    assert reg.exists()
+    assert not [f for f in reg.parent.iterdir() if f.name.endswith(".restoring")]
+
+
 def test_restore_without_an_archive_says_nothing(tmp_path, monkeypatch, capsys):
     reg, _ = _local_data(tmp_path, monkeypatch)
     reg.unlink()
@@ -676,9 +847,19 @@ def restore_local_data() -> None:
                 if path.exists() or name not in held:
                     continue
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(z.read(name))
+                # Through a temporary file, because of the rule right above:
+                # writing the destination directly leaves a partial file if this
+                # is interrupted, and the next run would see a file that exists
+                # and refuse to restore over it. A half-written registry would
+                # block automatic recovery for good.
+                tmp = path.with_name(path.name + ".restoring")
+                try:
+                    tmp.write_bytes(z.read(name))
+                    os.replace(tmp, path)
+                finally:
+                    tmp.unlink(missing_ok=True)
                 restored.append(name)
-    except (OSError, zipfile.BadZipFile) as e:
+    except Exception as e:
         print(f"warning: could not read the safety backup {archive}: {e}", file=sys.stderr)
         return
     if not restored:
@@ -687,7 +868,7 @@ def restore_local_data() -> None:
         if name == "devices.yaml":
             try:
                 n = len(load_registry(paths[name]))
-            except FlashError:
+            except Exception:
                 print("Restored devices.yaml from the safety backup.")
                 continue
             print(
@@ -702,7 +883,7 @@ def restore_local_data() -> None:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/test_flash.py -v`
-Expected: PASS, 101 passed
+Expected: PASS, 107 passed
 
 - [ ] **Step 5: Commit**
 
@@ -720,6 +901,13 @@ A file that still exists is never overwritten - the archive is a floor, not
 an authority. A missing archive is a first run, not an error, and says
 nothing. An archive that will not open warns rather than claiming a restore
 it did not perform.
+
+Each file goes through a temporary name and os.replace(), which matters more
+here than in the backup precisely because of the no-overwrite rule: writing
+the destination directly would leave a partial file if the run were
+interrupted, and the next run would see a file that exists and decline to
+restore over it. A half-written registry would block automatic recovery for
+good.
 
 Created for Conrad Storz with the help of Claude Code (conradstorz@gmail.com)
 MSGEOF
@@ -860,7 +1048,7 @@ to:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests -v`
-Expected: PASS, 105 passed
+Expected: PASS, 111 passed
 
 - [ ] **Step 5: Document it in the firmware README**
 
@@ -899,7 +1087,7 @@ synced or shared.
 - [ ] **Step 6: Run the whole suite once more**
 
 Run: `uv run pytest tests -v`
-Expected: PASS, 105 passed
+Expected: PASS, 111 passed
 
 - [ ] **Step 7: Commit**
 
@@ -935,7 +1123,7 @@ uv run pytest tests -q
 uv run flash.py --register-only --port COM6
 ```
 
-Expected: 105 tests pass; the register-only run prints the known clock and leaves
+Expected: 111 tests pass; the register-only run prints the known clock and leaves
 `%LOCALAPPDATA%\HU-058_ESPHome\HU-058_clock_safety_backup_of_local_data.zip`
 holding `README.md`, `devices.yaml` and `secrets.yaml`.
 
