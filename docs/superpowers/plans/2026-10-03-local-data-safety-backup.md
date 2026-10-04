@@ -183,7 +183,7 @@ def _local_data_paths() -> dict[str, Path]:
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `uv run pytest tests/test_flash.py -v`
+Run: `uv run pytest tests -v`  (the whole suite: the counts below include tests/test_flash_clock_launcher.py)
 Expected: PASS, 85 passed
 
 - [ ] **Step 6: Commit**
@@ -336,7 +336,7 @@ def backup_readme(files: list[str], clocks: int | None) -> str:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `uv run pytest tests/test_flash.py -v`
+Run: `uv run pytest tests -v`  (the whole suite: the counts below include tests/test_flash_clock_launcher.py)
 Expected: PASS, 88 passed
 
 - [ ] **Step 5: Commit**
@@ -685,7 +685,7 @@ def backup_local_data() -> None:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `uv run pytest tests/test_flash.py -v`
+Run: `uv run pytest tests -v`  (the whole suite: the counts below include tests/test_flash_clock_launcher.py)
 Expected: PASS, 101 passed
 
 - [ ] **Step 5: Commit**
@@ -882,7 +882,7 @@ def restore_local_data() -> None:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `uv run pytest tests/test_flash.py -v`
+Run: `uv run pytest tests -v`  (the whole suite: the counts below include tests/test_flash_clock_launcher.py)
 Expected: PASS, 107 passed
 
 - [ ] **Step 5: Commit**
