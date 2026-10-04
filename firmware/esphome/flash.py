@@ -326,6 +326,71 @@ def _local_data_paths() -> dict[str, Path]:
     return {"devices.yaml": REGISTRY_PATH, "secrets.yaml": SECRETS_PATH}
 
 
+def backup_readme(files: list[str], clocks: int | None) -> str:
+    """The README.md written into the archive, for whoever finds it later."""
+    import platform
+
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    held = "\n".join(f"- `{f}`" for f in files)
+    count = ""
+    if clocks is not None:
+        count = (
+            f"The registry in this archive holds {clocks} "
+            f"{'clock' if clocks == 1 else 'clocks'}.\n\n"
+        )
+    return (
+        "# HU-058 clock safety backup\n"
+        "\n"
+        "`flash.py` wrote this archive the last time it put firmware on a clock.\n"
+        "It is a copy of the only two files in the HU-058 project that cannot be\n"
+        "recreated from the repository.\n"
+        "\n"
+        f"- Written: {stamp}\n"
+        f"- Workstation: {platform.node()}\n"
+        f"- Repository: {HERE}\n"
+        f"- Archive: {backup_path()}\n"
+        "\n"
+        "## What is in here\n"
+        "\n"
+        f"{held}\n"
+        "\n"
+        f"{count}"
+        "`devices.yaml` maps each clock's ESP32 factory MAC address to the name,\n"
+        "friendly name and first-flashed date it was given. It is what stops\n"
+        "`flash.py` minting a second identity for a clock Home Assistant has\n"
+        "already paired.\n"
+        "\n"
+        "`secrets.yaml` holds the WiFi credentials and, for every clock, its API\n"
+        "encryption key and OTA password. Home Assistant already has the old keys,\n"
+        "so these cannot be regenerated: a clock whose keys are lost has to be\n"
+        "removed from Home Assistant and added again by hand.\n"
+        "\n"
+        "## Getting them back\n"
+        "\n"
+        "The next `uv run flash.py` restores either file automatically if it has\n"
+        "gone missing, before it reads the registry. Nothing to do.\n"
+        "\n"
+        "By hand: unzip these files into `firmware/esphome/` in the repository. A\n"
+        "file that still exists is never overwritten automatically, so move the\n"
+        "current one aside first if you mean to replace it.\n"
+        "\n"
+        "## Why this lives outside the repository\n"
+        "\n"
+        "Both files are gitignored, and git treats an untracked ignored file as\n"
+        "expendable. It deletes one on a `git pull` carrying the commit that\n"
+        "untracked it, silently overwrites one on a `git checkout` of any commit\n"
+        "from before that and deletes it again on the way back, and removes one\n"
+        "with `git clean -xdf`. A backup kept in the working tree would go in the\n"
+        "same command as the original.\n"
+        "\n"
+        "## Keep it to yourself\n"
+        "\n"
+        "`secrets.yaml` holds live credentials and this archive is not encrypted.\n"
+        "It is fine where it is, under your own user profile. Do not put it in a\n"
+        "cloud-synced folder, attach it to an issue, or paste it into a chat.\n"
+    )
+
+
 # --- resolution -------------------------------------------------------------
 
 def resolve_device(

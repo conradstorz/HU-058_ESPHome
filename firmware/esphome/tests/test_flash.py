@@ -429,6 +429,37 @@ def test_local_data_paths_follow_the_module_constants(tmp_path, monkeypatch):
     assert tuple(flash._local_data_paths()) == flash.BACKUP_MEMBERS
 
 
+def test_backup_readme_names_the_archive_and_the_clock_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path)
+
+    body = flash.backup_readme(["devices.yaml", "secrets.yaml"], clocks=3)
+
+    assert "# HU-058 clock safety backup" in body
+    assert str(flash.backup_path()) in body
+    assert str(flash.HERE) in body
+    assert "holds 3 clocks" in body
+    assert "`devices.yaml`" in body
+    assert "`secrets.yaml`" in body
+    assert "uv run flash.py" in body
+    assert "git clean -xdf" in body
+    assert "not encrypted" in body
+
+
+def test_backup_readme_says_one_clock_in_the_singular(tmp_path, monkeypatch):
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path)
+
+    assert "holds 1 clock." in flash.backup_readme(["devices.yaml"], clocks=1)
+
+
+def test_backup_readme_omits_the_count_when_there_is_no_registry(tmp_path, monkeypatch):
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path)
+
+    body = flash.backup_readme(["secrets.yaml"], clocks=None)
+
+    assert "clocks." not in body
+    assert "`secrets.yaml`" in body
+
+
 # --- the build cache --------------------------------------------------------
 
 # ESPHome installs ccache with the ESP-IDF tools but resolves whether to use it
