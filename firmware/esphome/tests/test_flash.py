@@ -767,6 +767,158 @@ def test_backup_writes_a_shorter_registry_and_warns(tmp_path, monkeypatch, capsy
     assert "down to 1 from 2 clocks" in capsys.readouterr().err
 
 
+# The shrink allowance above is reachable without anyone editing anything.
+# `git checkout <a commit from before devices.yaml was untracked>` silently
+# overwrites the gitignored registry with the older, shorter tracked content,
+# exit 0 and no output. The restore then skips the file because it exists, the
+# member sets match, the count is merely lower - and the warning above would
+# replace the archive with the stale registry. secrets.yaml is the witness
+# that tells the two apart: git never tracked it, so a rollback leaves it
+# holding the keys of every clock the rollback dropped.
+
+def _three_clocks():
+    return [
+        flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03"),
+        flash.Device("11:22:33:44:55:66", "clock-y", "Clock Y", "2026-10-03"),
+        flash.Device("22:33:44:55:66:77", "clock-z", "Clock Z", "2026-10-03"),
+    ]
+
+
+def _secrets_for(sec, names):
+    lines = ["wifi_ssid: net"]
+    for name in names:
+        api_key_name, ota_password_name = flash.secret_names(name)
+        lines += [f"{api_key_name}: key-{name}", f"{ota_password_name}: ota-{name}"]
+    sec.write_text("\n".join(lines) + "\n")
+
+
+def test_backup_keeps_the_old_archive_when_a_checkout_rolled_the_registry_back(tmp_path, monkeypatch, capsys):
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    clocks = _three_clocks()
+    flash.save_registry(reg, clocks)
+    _secrets_for(sec, [d.name for d in clocks])
+    flash.backup_local_data()
+    before = flash.backup_path().read_bytes()
+    capsys.readouterr()
+
+    # What `git checkout <old commit>` does: the shorter tracked registry
+    # lands on top of the gitignored one, and secrets.yaml is left alone.
+    flash.save_registry(reg, clocks[:1])
+    flash.backup_local_data()
+
+    assert flash.backup_path().read_bytes() == before
+    err = capsys.readouterr().err
+    assert "keeping the existing safety backup" in err
+    assert str(flash.backup_path()) in err
+    assert "clock-y" in err
+    assert "clock-z" in err
+    assert "rolled back" in err
+    # The shrink warning claims it is backing up the shorter registry, which
+    # would be a lie on this path.
+    assert "backing up the shorter registry" not in err
+
+
+def test_backup_writes_a_shorter_registry_when_the_dropped_clocks_secrets_went_too(tmp_path, monkeypatch, capsys):
+    # The legitimate hand edit the allowance exists for: the scrapped board's
+    # entry and its keys both go, so there is no witness left behind.
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    clocks = _three_clocks()
+    flash.save_registry(reg, clocks)
+    _secrets_for(sec, [d.name for d in clocks])
+    flash.backup_local_data()
+    capsys.readouterr()
+
+    flash.save_registry(reg, clocks[:2])
+    _secrets_for(sec, ["clock-x", "clock-y"])
+    flash.backup_local_data()
+
+    err = capsys.readouterr().err
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "clock-z" not in z.read("devices.yaml").decode()
+    assert "down to 2 from 3 clocks" in err
+    assert "rolled back" not in err
+
+
+def test_the_rollback_guard_is_silent_when_the_registry_grows_or_holds(tmp_path, monkeypatch, capsys):
+    # An orphaned api_key_* on its own is not a rollback: the count has to
+    # have gone down. clock-z is keyed in secrets throughout and never in the
+    # registry until the last step.
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    clocks = _three_clocks()
+    flash.save_registry(reg, clocks[:2])
+    _secrets_for(sec, [d.name for d in clocks])
+    flash.backup_local_data()
+    capsys.readouterr()
+
+    flash.backup_local_data()            # same count
+    flash.save_registry(reg, clocks)     # grown
+    flash.backup_local_data()
+
+    assert capsys.readouterr().err == ""
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "clock-z" in z.read("devices.yaml").decode()
+
+
+def test_the_rollback_guard_does_not_fire_when_two_registries_merely_differ(tmp_path, monkeypatch, capsys):
+    # Same count, different names. Out of scope on purpose: the allowance this
+    # discriminates is the shrink allowance, and nothing has shrunk here.
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    clocks = _three_clocks()
+    flash.save_registry(reg, clocks[:2])
+    _secrets_for(sec, [d.name for d in clocks])
+    flash.backup_local_data()
+    capsys.readouterr()
+
+    flash.save_registry(reg, [clocks[0], clocks[2]])
+    flash.backup_local_data()
+
+    assert capsys.readouterr().err == ""
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "clock-y" not in z.read("devices.yaml").decode()
+
+
+def test_the_rollback_guard_does_not_block_a_shrink_when_secrets_are_absent(tmp_path, monkeypatch, capsys):
+    # The archive must never have held secrets.yaml, or the loss guard returns
+    # first and this would pass without the new guard ever running.
+    reg, _ = _local_data(tmp_path, monkeypatch, secrets=False)
+    clocks = _three_clocks()
+    flash.save_registry(reg, clocks)
+    flash.backup_local_data()
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "devices.yaml"]
+    capsys.readouterr()
+
+    flash.save_registry(reg, clocks[:1])
+    flash.backup_local_data()
+
+    err = capsys.readouterr().err
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "clock-y" not in z.read("devices.yaml").decode()
+    assert "down to 1 from 3 clocks" in err
+    assert "rolled back" not in err
+
+
+def test_the_rollback_guard_does_not_block_a_shrink_on_unreadable_secrets(tmp_path, monkeypatch, capsys):
+    # secrets.yaml that will not parse is skipped from the candidates with its
+    # own warning, and must not also be grounds for refusing the backup: the
+    # witness cannot be read, so it cannot testify either way.
+    reg, sec = _local_data(tmp_path, monkeypatch, secrets=False)
+    clocks = _three_clocks()
+    flash.save_registry(reg, clocks)
+    flash.backup_local_data()
+    capsys.readouterr()
+
+    flash.save_registry(reg, clocks[:1])
+    sec.write_text("key: [unclosed\n")
+    flash.backup_local_data()
+
+    err = capsys.readouterr().err
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "clock-y" not in z.read("devices.yaml").decode()
+    assert "down to 1 from 3 clocks" in err
+    assert "rolled back" not in err
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX modes; Windows uses the profile ACL")
 def test_backup_is_readable_only_by_its_owner(tmp_path, monkeypatch):
     _local_data(tmp_path, monkeypatch)

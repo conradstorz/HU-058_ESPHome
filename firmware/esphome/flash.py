@@ -462,6 +462,63 @@ def _backup_candidates(paths: dict[str, Path]) -> list[tuple[str, Path]]:
     return out
 
 
+def _archived_clock_names(path: Path) -> set[str]:
+    """The clock names the registry inside an existing archive holds.
+
+    Empty on any failure, which is safe only because of where this is called
+    from. backup_local_data() has already returned, keeping the archive, when
+    _archive_state() could not read it, so by the time this runs the archive
+    has been read through once successfully. An empty answer here therefore
+    means an archive with no registry to compare against, not one whose
+    registry could not be read.
+
+    Through load_registry(), like _archive_state(), so one place decides what
+    a registry is and what counts as a clock in it.
+    """
+    try:
+        with zipfile.ZipFile(path) as z:
+            raw = z.read("devices.yaml")
+        with tempfile.TemporaryDirectory() as d:
+            extracted = Path(d) / "devices.yaml"
+            extracted.write_bytes(raw)
+            return {device.name for device in load_registry(extracted)}
+    except Exception:
+        return set()
+
+
+def _stale_dropped_clocks(archive: Path, registry: Path, secrets: Path) -> list[str]:
+    """Clocks the archive holds, this registry does not, and secrets still key.
+
+    The discriminator between a hand edit and a substitution. Dropping a
+    scrapped board's entry by hand takes its api_key_* with it, or knowingly
+    orphans it. A `git checkout` of any commit from before devices.yaml was
+    untracked rolls the registry back and leaves secrets.yaml - which git
+    never tracked, so nothing touches it - holding the keys of every clock the
+    rollback dropped. A dropped clock whose API key is still here is the
+    signature of the substitution.
+
+    secret_names() rather than a second spelling of the convention, so the
+    name-to-secret-key mapping has one source of truth.
+
+    Empty on any failure. A secrets.yaml that is missing or will not parse is
+    a witness that cannot testify either way, and no reason on its own to
+    refuse the backup; backup_local_data() must never raise.
+    """
+    try:
+        dropped = _archived_clock_names(archive) - {d.name for d in load_registry(registry)}
+        if not dropped:
+            return []
+        present = _secret_keys(secrets)
+    except Exception:
+        return []
+    stale = []
+    for name in sorted(dropped):
+        api_key_name, _ = secret_names(name)
+        if api_key_name in present:
+            stale.append(name)
+    return stale
+
+
 def backup_local_data() -> None:
     """Copy devices.yaml and secrets.yaml into the safety archive.
 
@@ -472,7 +529,8 @@ def backup_local_data() -> None:
     try:
         target = backup_path()
         existing, archived = _archive_state(target)
-        candidates = _backup_candidates(_local_data_paths())
+        paths = _local_data_paths()
+        candidates = _backup_candidates(paths)
         names = {n for n, _ in candidates}
         # Any member the archive holds and this run does not is a loss. A
         # proper-subset test is not enough: {secrets.yaml} against an archived
@@ -500,9 +558,11 @@ def backup_local_data() -> None:
             )
             return
         clocks = None
+        registry = None
         for name, path in candidates:
             if name == "devices.yaml":
                 clocks = len(load_registry(path))
+                registry = path
         # A zero-byte devices.yaml is valid YAML and loads as no clocks at all,
         # so truncation to nothing clears every check above with its member set
         # intact.
@@ -514,6 +574,23 @@ def backup_local_data() -> None:
             )
             return
         if clocks is not None and archived > clocks:
+            # Last of the four guards on purpose. It reopens the archive and
+            # reads secrets.yaml, and only a count that has already shrunk
+            # makes either worth doing - the three guards above decide every
+            # other case without either read.
+            if stale := _stale_dropped_clocks(target, registry, paths["secrets.yaml"]):
+                print(
+                    f"warning: keeping the existing safety backup {target}: devices.yaml is "
+                    f"down to {clocks} from {archived} clocks, but secrets.yaml still holds "
+                    f"the API key for {', '.join(stale)}. That reads as a registry rolled "
+                    "back rather than edited - a git checkout of a commit from before "
+                    "devices.yaml was untracked overwrites it in place - so the backup keeps "
+                    "the longer registry. If you did mean to drop those clocks, take their "
+                    "api_key_* and ota_password_* lines out of secrets.yaml too and run "
+                    "again.",
+                    file=sys.stderr,
+                )
+                return
             # Dropping a scrapped board's entry by hand is legitimate and has to
             # reach the backup. It just says so on the way past.
             print(
