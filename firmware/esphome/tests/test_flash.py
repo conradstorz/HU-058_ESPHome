@@ -416,11 +416,17 @@ def test_backup_path_is_the_named_archive_in_the_backup_dir(tmp_path, monkeypatc
     assert flash.ARCHIVE_NAME == "HU-058_clock_safety_backup_of_local_data.zip"
 
 
+REPO_DIR = Path(flash.__file__).resolve().parent
+
+
 @pytest.mark.real_backup_dir
 def test_backup_dir_is_outside_the_repository():
+    # REPO_DIR, not flash.HERE: the autouse fixture redirects HERE for every
+    # test including this one, and un-patching it here would reintroduce the
+    # hazard that fixture exists for.
     assert flash.backup_dir().name == "HU-058_ESPHome"
-    assert flash.HERE not in flash.backup_dir().parents
-    assert flash.backup_dir() != flash.HERE
+    assert REPO_DIR not in flash.backup_dir().parents
+    assert flash.backup_dir() != REPO_DIR
 
 
 def test_the_suite_never_resolves_the_real_backup_dir():
@@ -433,6 +439,25 @@ def test_the_suite_never_resolves_the_real_backup_dir():
 
     assert flash.backup_dir() != real
     assert real not in flash.backup_dir().parents
+
+
+def test_the_suite_never_points_at_the_real_local_data():
+    # The other half of the autouse redirect. restore_local_data() writes
+    # REGISTRY_PATH and SECRETS_PATH, so a test that calls it without
+    # overriding them writes the user's live registry and secrets.
+    assert flash.REGISTRY_PATH.parent != REPO_DIR
+    assert flash.SECRETS_PATH.parent != REPO_DIR
+    assert flash.HERE != REPO_DIR
+
+
+@pytest.mark.real_backup_dir
+def test_the_real_backup_dir_opt_out_still_redirects_the_working_tree():
+    # The two protections are independent on purpose: wanting the real
+    # backup_dir() for a read-only assertion is no reason to be handed the
+    # real registry and secrets as well.
+    assert flash.REGISTRY_PATH.parent != REPO_DIR
+    assert flash.SECRETS_PATH.parent != REPO_DIR
+    assert flash.HERE != REPO_DIR
 
 
 def test_local_data_paths_follow_the_module_constants(tmp_path, monkeypatch):
@@ -489,6 +514,47 @@ def _local_data(tmp_path, monkeypatch, registry=True, secrets=True):
     if secrets:
         sec.write_text("wifi_ssid: net\napi_key_clock_x: key\n")
     return reg, sec
+
+
+ARCHIVED_REGISTRY = (
+    "devices:\n"
+    "- mac: 'aa:bb:cc:dd:ee:ff'\n"
+    "  name: clock-x\n"
+    "  friendly_name: Clock X\n"
+    "  first_flashed: '2026-10-03'\n"
+)
+ARCHIVED_SECRETS = "wifi_ssid: net\napi_key_clock_x: archived-key\n"
+
+
+def _archive_with_a_damaged_registry(path):
+    """A zip whose central directory is fine and whose devices.yaml is not.
+
+    Hand built rather than taken from backup_local_data(), and stored rather
+    than deflated, so the registry's bytes sit in the file verbatim: patching
+    them in place with the same number of bytes keeps every offset and length
+    in the central directory honest, and only the member's CRC stops matching.
+    That is the shape of real rot - the archive opens, lists its members, and
+    then one read of one member fails.
+
+    secrets.yaml is left intact, because the whole point is that an intact
+    member must survive a damaged neighbour.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("README.md", "# HU-058 clock safety backup\n")
+        z.writestr("devices.yaml", ARCHIVED_REGISTRY)
+        z.writestr("secrets.yaml", ARCHIVED_SECRETS)
+    marker = b"Clock X"  # only in the registry member
+    raw = path.read_bytes()
+    assert raw.count(marker) == 1, "the fixture has drifted: patch the registry, nothing else"
+    i = raw.index(marker)
+    path.write_bytes(raw[:i] + b"@" * len(marker) + raw[i + len(marker):])
+    with zipfile.ZipFile(path) as z:
+        assert sorted(z.namelist()) == ["README.md", "devices.yaml", "secrets.yaml"]
+        assert z.read("secrets.yaml").decode() == ARCHIVED_SECRETS
+        with pytest.raises(Exception):
+            z.read("devices.yaml")
+    return path
 
 
 def test_backup_writes_both_files_and_a_readme(tmp_path, monkeypatch):
@@ -611,6 +677,80 @@ def test_backup_keeps_the_old_archive_when_the_registry_is_emptied(tmp_path, mon
     assert "no clocks" in capsys.readouterr().err
 
 
+def test_archive_state_tells_an_empty_registry_from_an_unreadable_one(tmp_path, monkeypatch):
+    # The distinction the overwrite guard below is built on. Collapsing both to
+    # 0 disarms every count comparison exactly when the archive is damaged.
+    _local_data(tmp_path, monkeypatch)
+    archive = flash.backup_path()
+
+    assert flash._archive_state(archive) == (set(), 0)
+
+    flash.backup_local_data()
+    assert flash._archive_state(archive) == ({"devices.yaml", "secrets.yaml"}, 1)
+
+    flash.REGISTRY_PATH.write_text("")
+    archive.unlink()
+    flash.backup_local_data()
+    assert flash._archive_state(archive) == ({"devices.yaml", "secrets.yaml"}, 0)
+
+    _archive_with_a_damaged_registry(archive)
+    assert flash._archive_state(archive) == ({"devices.yaml", "secrets.yaml"}, None)
+
+    archive.write_text("not a zip file")
+    assert flash._archive_state(archive) == (set(), None)
+
+
+def test_backup_keeps_an_archive_whose_registry_cannot_be_read(tmp_path, monkeypatch, capsys):
+    # The archive opens and lists both members, so the loss guard sees nothing
+    # missing; only the read of devices.yaml fails. Reporting that as 0 clocks
+    # let a one-clock registry overwrite an archive that may have held eleven,
+    # with the keys Home Assistant has and nothing else does.
+    _local_data(tmp_path, monkeypatch)
+    _archive_with_a_damaged_registry(flash.backup_path())
+    before = flash.backup_path().read_bytes()
+
+    flash.backup_local_data()
+
+    assert flash.backup_path().read_bytes() == before
+    err = capsys.readouterr().err
+    assert "keeping the existing safety backup" in err
+    assert str(flash.backup_path()) in err
+    assert "cannot be read" in err
+
+
+def test_backup_keeps_an_archive_that_will_not_open_at_all(tmp_path, monkeypatch, capsys):
+    # It used to list no members and report 0 clocks, which reads as "nothing
+    # to lose" and overwrote it. A zip whose end-of-central-directory record
+    # is damaged still holds every member's bytes, recoverable by hand, and
+    # that is the copy worth keeping. The warning says how to get out of it.
+    _local_data(tmp_path, monkeypatch)
+    flash.backup_path().parent.mkdir(parents=True, exist_ok=True)
+    flash.backup_path().write_text("not a zip file")
+
+    flash.backup_local_data()
+
+    assert flash.backup_path().read_text() == "not a zip file"
+    err = capsys.readouterr().err
+    assert "keeping the existing safety backup" in err
+    assert "delete it" in err
+
+
+def test_the_keep_the_old_archive_warnings_name_the_archive(tmp_path, monkeypatch, capsys):
+    # A user told "keeping the existing safety backup" has nothing to go look
+    # at unless the message says where it is. restore_local_data() already
+    # names it.
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+
+    reg.unlink()
+    flash.backup_local_data()
+    assert str(flash.backup_path()) in capsys.readouterr().err
+
+    reg.write_text("")
+    flash.backup_local_data()
+    assert str(flash.backup_path()) in capsys.readouterr().err
+
+
 def test_backup_writes_a_shorter_registry_and_warns(tmp_path, monkeypatch, capsys):
     reg, _ = _local_data(tmp_path, monkeypatch)
     flash.save_registry(reg, [
@@ -637,12 +777,79 @@ def test_backup_is_readable_only_by_its_owner(tmp_path, monkeypatch):
     assert flash.backup_path().parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_backup_asks_for_owner_only_permissions_on_every_host(tmp_path, monkeypatch):
+    # The POSIX test above is skipped on Windows, and tmp_path is always made
+    # fresh, so neither covers tightening a directory that was already there
+    # with a looser mode. Assert the calls instead: the intent is then
+    # exercised wherever the suite runs.
+    _local_data(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(flash.os, "chmod", lambda path, mode: calls.append((Path(path), mode)))
+
+    flash.backup_local_data()
+
+    assert (flash.backup_path(), 0o600) in calls
+    assert (flash.backup_path().parent, 0o700) in calls
+
+
+def test_backup_tightens_a_directory_that_already_exists(tmp_path, monkeypatch):
+    # mkdir(mode=...) does nothing for a directory that is already there, so
+    # the chmod is the only thing that reaches one left loose by an earlier
+    # version or by the user's umask.
+    _local_data(tmp_path, monkeypatch)
+    flash.backup_path().parent.mkdir(parents=True, exist_ok=True)
+    calls = []
+    monkeypatch.setattr(flash.os, "chmod", lambda path, mode: calls.append((Path(path), mode)))
+
+    flash.backup_local_data()
+
+    assert (flash.backup_path().parent, 0o700) in calls
+
+
+def test_backup_survives_a_chmod_it_cannot_do_and_says_so_separately(tmp_path, monkeypatch, capsys):
+    # The archive is written and correct by the time the chmod runs. Reporting
+    # "could not write the safety backup" would send the user looking for a
+    # file that is sitting right there.
+    _local_data(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        flash.os, "chmod", lambda path, mode: (_ for _ in ()).throw(OSError("not supported"))
+    )
+
+    flash.backup_local_data()
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert sorted(z.namelist()) == ["README.md", "devices.yaml", "secrets.yaml"]
+    err = capsys.readouterr().err
+    assert "could not write the safety backup" not in err
+    assert "could not restrict it to your account" in err
+
+
 def test_backup_leaves_no_temporary_file_behind(tmp_path, monkeypatch):
     _local_data(tmp_path, monkeypatch)
 
     flash.backup_local_data()
 
     assert [p.name for p in flash.backup_path().parent.iterdir()] == [flash.ARCHIVE_NAME]
+
+
+def test_backup_writes_through_a_temporary_file_named_for_this_run_alone(tmp_path, monkeypatch):
+    # Two terminals share this directory by design - a --port COM4 beside a
+    # --port COM7, or a --register-only beside a flash. A fixed temporary name
+    # has both runs writing one file, and whichever replace lands last
+    # installs the interleaving as the archive.
+    _local_data(tmp_path, monkeypatch)
+    real_replace = flash.os.replace
+    seen = []
+    monkeypatch.setattr(
+        flash.os, "replace", lambda src, dst: seen.append(Path(src)) or real_replace(src, dst)
+    )
+
+    flash.backup_local_data()
+    flash.backup_local_data()
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+    assert flash.ARCHIVE_NAME + ".tmp" not in [p.name for p in seen]
 
 
 def test_backup_warns_and_does_not_raise_when_it_cannot_write(tmp_path, monkeypatch, capsys):
@@ -710,7 +917,99 @@ def test_restore_leaves_no_temporary_file_behind(tmp_path, monkeypatch):
     flash.restore_local_data()
 
     assert reg.exists()
-    assert not [f for f in reg.parent.iterdir() if f.name.endswith(".restoring")]
+    assert not [f for f in reg.parent.iterdir() if ".restoring" in f.name]
+
+
+def test_restore_writes_through_a_temporary_file_named_for_this_run_alone(tmp_path, monkeypatch):
+    # Same reason as the archive's: two runs in two terminals, one fixed name,
+    # one interleaved file installed as the registry.
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    reg.unlink()
+    sec.unlink()
+    real_replace = flash.os.replace
+    seen = []
+    monkeypatch.setattr(
+        flash.os, "replace", lambda src, dst: seen.append(Path(src)) or real_replace(src, dst)
+    )
+
+    flash.restore_local_data()
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+    assert {reg.name + ".restoring", sec.name + ".restoring"}.isdisjoint(p.name for p in seen)
+
+
+def test_restore_recovers_an_intact_member_past_a_damaged_one(tmp_path, monkeypatch, capsys):
+    # The loss sequence this exists to stop: devices.yaml is attempted first,
+    # so one bad CRC on the registry used to end the restore and hide an
+    # intact secrets.yaml behind it. The flash then minted a new identity,
+    # wrote a one-clock secrets.yaml, and the next backup replaced the archive
+    # that still held every old key - keys Home Assistant has and that cannot
+    # be regenerated.
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    _archive_with_a_damaged_registry(flash.backup_path())
+    reg.unlink()
+    sec.unlink()
+
+    flash.restore_local_data()
+
+    assert not reg.exists()
+    assert sec.read_text() == ARCHIVED_SECRETS
+    out = capsys.readouterr()
+    assert "Restored secrets.yaml" in out.out
+    assert "Restored devices.yaml" not in out.out
+    assert "devices.yaml" in out.err
+    assert str(flash.backup_path()) in out.err
+    # Nothing half written and no temporary file for the next run to trip on.
+    assert not [f for f in tmp_path.iterdir() if ".restoring" in f.name]
+
+
+def test_restore_cleans_up_when_the_move_into_place_fails(tmp_path, monkeypatch, capsys):
+    # The invariant the temporary file exists for. A partial devices.yaml left
+    # at the destination is a file that exists, which restore refuses to
+    # overwrite: automatic recovery would be blocked for good.
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    reg.unlink()
+    monkeypatch.setattr(
+        flash.os, "replace", lambda src, dst: (_ for _ in ()).throw(OSError("denied"))
+    )
+
+    flash.restore_local_data()
+
+    assert not reg.exists()
+    assert not [f for f in tmp_path.iterdir() if ".restoring" in f.name]
+    err = capsys.readouterr().err
+    assert "could not restore devices.yaml" in err
+    assert "denied" in err
+
+
+def test_restore_reports_only_what_it_actually_put_back(tmp_path, monkeypatch, capsys):
+    # restored used to be initialised inside the guarded block and rebound by
+    # the loop, so a run that landed one file and then failed reported either
+    # nothing or the wrong thing.
+    reg, sec = _local_data(tmp_path, monkeypatch)
+    flash.backup_local_data()
+    reg.unlink()
+    sec.unlink()
+    real_replace = flash.os.replace
+
+    def replace_once(src, dst):
+        if Path(dst) == sec:
+            raise OSError("denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(flash.os, "replace", replace_once)
+
+    flash.restore_local_data()
+
+    out = capsys.readouterr()
+    assert "Restored devices.yaml" in out.out
+    assert "Restored secrets.yaml" not in out.out
+    assert "could not restore secrets.yaml" in out.err
+    assert reg.exists()
+    assert not sec.exists()
 
 
 def test_restore_without_an_archive_says_nothing(tmp_path, monkeypatch, capsys):
@@ -734,6 +1033,20 @@ def test_restore_warns_on_an_archive_it_cannot_open(tmp_path, monkeypatch, capsy
     flash.restore_local_data()
 
     assert "warning" in capsys.readouterr().err
+    assert not reg.exists()
+
+
+def test_restore_warns_and_does_not_raise_when_the_backup_dir_cannot_be_resolved(tmp_path, monkeypatch, capsys):
+    # backup_path() is inside the guard here too, as it is for the backup: a
+    # flash must survive anything platformdirs does, and this one runs before
+    # the registry is read, so raising would stop the flash dead.
+    reg, _ = _local_data(tmp_path, monkeypatch)
+    reg.unlink()
+    monkeypatch.setattr(flash, "backup_dir", lambda: (_ for _ in ()).throw(RuntimeError("no data dir")))
+
+    flash.restore_local_data()
+
+    assert "no data dir" in capsys.readouterr().err
     assert not reg.exists()
 
 

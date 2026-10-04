@@ -18,6 +18,7 @@ import re
 import secrets as pysecrets
 import subprocess
 import sys
+import tempfile
 import zipfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -391,31 +392,48 @@ def backup_readme(files: list[str], clocks: int | None) -> str:
     )
 
 
-def _archive_members(path: Path) -> set[str]:
-    """The data files an existing archive holds; empty when it cannot be read."""
+def _archive_state(path: Path) -> tuple[set[str], int | None]:
+    """What an existing archive holds: its data members, and its clock count.
+
+    One open for both answers, because they come from the same file and two
+    opens could see two different ones.
+
+    The clock count is None when the archive is there but the question could
+    not be answered: a damaged member, a central directory that will not
+    parse, a registry that will not load. That is a different fact from 0,
+    which means a readable archive whose registry genuinely holds no clocks,
+    and the caller has to tell them apart - an unreadable archive is the one
+    thing that must never be overwritten, and reporting it as empty disarms
+    exactly the guards that would have saved it.
+
+    The member set is kept even when the count fails, so an archive with a
+    readable central directory and a damaged member still gets the more
+    specific "it still holds X" warning out of the loss guard.
+    """
     if not path.exists():
-        return set()
+        return set(), 0
+    members: set[str] = set()
     try:
         with zipfile.ZipFile(path) as z:
-            return {n for n in z.namelist() if n in BACKUP_MEMBERS}
-    except (OSError, zipfile.BadZipFile):
-        return set()
-
-
-def _archived_clocks(path: Path) -> int:
-    """How many clocks the archived registry holds; 0 when there is none."""
-    if not path.exists():
-        return 0
-    try:
-        with zipfile.ZipFile(path) as z:
-            if "devices.yaml" not in z.namelist():
-                return 0
-            raw = yaml.safe_load(z.read("devices.yaml").decode())
+            members = {n for n in z.namelist() if n in BACKUP_MEMBERS}
+            if "devices.yaml" not in members:
+                return members, 0
+            raw = z.read("devices.yaml")
     except Exception:
-        return 0
-    if not isinstance(raw, dict):
-        return 0
-    return len(raw.get("devices") or [])
+        # Deliberately broad, like the probe in _backup_candidates below: a
+        # bad CRC, a truncated member and a lie in the central directory all
+        # mean the same thing here, and letting one escape would crash the
+        # flash.
+        return members, None
+    try:
+        # Through load_registry(), not a second reading of the schema: one
+        # place decides what a registry is and what counts as a clock in it.
+        with tempfile.TemporaryDirectory() as d:
+            extracted = Path(d) / "devices.yaml"
+            extracted.write_bytes(raw)
+            return members, len(load_registry(extracted))
+    except Exception:
+        return members, None
 
 
 def _backup_candidates(paths: dict[str, Path]) -> list[tuple[str, Path]]:
@@ -453,34 +471,45 @@ def backup_local_data() -> None:
     tmp = None
     try:
         target = backup_path()
-        tmp = target.with_name(target.name + ".tmp")
+        existing, archived = _archive_state(target)
         candidates = _backup_candidates(_local_data_paths())
         names = {n for n, _ in candidates}
         # Any member the archive holds and this run does not is a loss. A
         # proper-subset test is not enough: {secrets.yaml} against an archived
         # {devices.yaml} is incomparable, passes, and destroys the only copy of
         # the registry.
-        if lost := _archive_members(target) - names:
+        if lost := existing - names:
             print(
-                f"warning: keeping the existing safety backup: it still holds "
+                f"warning: keeping the existing safety backup {target}: it still holds "
                 f"{', '.join(sorted(lost))}, which is missing or unreadable here.",
                 file=sys.stderr,
             )
             return
         if not candidates:
             return
+        # Before any comparison against the archive, because there is nothing
+        # to compare against: an archive that cannot be read is the one copy
+        # that might still hold keys Home Assistant has and nothing else does.
+        if archived is None:
+            print(
+                f"warning: keeping the existing safety backup {target}: it cannot be "
+                "read, so there is no telling what overwriting it would lose. Unzip "
+                "what you can from it, then delete it and the next run will write a "
+                "fresh one.",
+                file=sys.stderr,
+            )
+            return
         clocks = None
         for name, path in candidates:
             if name == "devices.yaml":
                 clocks = len(load_registry(path))
-        archived = _archived_clocks(target)
         # A zero-byte devices.yaml is valid YAML and loads as no clocks at all,
         # so truncation to nothing clears every check above with its member set
         # intact.
         if clocks == 0 and archived:
             print(
-                "warning: keeping the existing safety backup: devices.yaml has no "
-                f"clocks and the backup holds {archived}.",
+                f"warning: keeping the existing safety backup {target}: devices.yaml "
+                f"has no clocks and the backup holds {archived}.",
                 file=sys.stderr,
             )
             return
@@ -493,14 +522,42 @@ def backup_local_data() -> None:
                 file=sys.stderr,
             )
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # mkdir()'s mode applies only to a directory it creates itself, and
+        # only to the last one: parents get the default, and a directory that
+        # was already there with a looser mode keeps it. Tighten it by hand,
+        # best effort - this is where credentials land. Only this directory,
+        # never its parents: AppData/Local and ~/.local/share are shared.
+        try:
+            os.chmod(target.parent, 0o700)
+        except OSError:
+            pass
+        # A unique temporary name, not target.name + ".tmp". The archive path
+        # is per-workstation by design, so two runs in two terminals - a
+        # --port COM4 beside a --port COM7, or a --register-only beside a
+        # flash - would open one fixed name twice, interleave into it, and
+        # whichever replace landed last would install a garbled zip.
+        fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
+        os.close(fd)
+        tmp = Path(tmp_name)
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("README.md", backup_readme([n for n, _ in candidates], clocks))
             for name, path in candidates:
                 z.write(path, name)
         os.replace(tmp, target)
+        tmp = None
         # Credentials: owner only. Close to a no-op on Windows, where the ACL on
-        # the user data directory is what applies.
-        os.chmod(target, 0o600)
+        # the user data directory is what applies. Its own message: the archive
+        # is written and correct by now, and saying "could not write the safety
+        # backup" about a file that is sitting there would send the user
+        # looking for the wrong problem.
+        try:
+            os.chmod(target, 0o600)
+        except OSError as e:
+            print(
+                f"warning: wrote the safety backup {target} but could not restrict it "
+                f"to your account: {e}",
+                file=sys.stderr,
+            )
     except Exception as e:
         print(f"warning: could not write the safety backup: {e}", file=sys.stderr)
         if tmp is not None:
@@ -508,6 +565,38 @@ def backup_local_data() -> None:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _restore_member(z: zipfile.ZipFile, name: str, path: Path) -> None:
+    """Write one archive member to path, or leave nothing behind trying."""
+    # Read before there is any temporary file to clean up: a member with a bad
+    # CRC then fails without having touched the working tree at all.
+    data = z.read(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Through a temporary file, because of restore_local_data's rule that a
+    # file which still exists is never overwritten: writing the destination
+    # directly leaves a partial file if this is interrupted, and the next run
+    # would see a file that exists and refuse to restore over it. A
+    # half-written registry would block automatic recovery for good.
+    #
+    # A unique name, not path.name + ".restoring", for the same reason the
+    # archive's temporary file has one: two runs in two terminals share this
+    # directory and would otherwise interleave into one file.
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".restoring")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except BaseException:
+        # Only on the way out, never in a finally: a cleanup that failed after
+        # a move that landed would report a restore that did happen as one
+        # that did not.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def restore_local_data() -> None:
@@ -519,36 +608,41 @@ def restore_local_data() -> None:
     never overwrites a file that is still there.
     """
     archive = None
+    paths = _local_data_paths()
+    # Before the guarded block, not inside it: a failure part-way through has
+    # to leave the files that did land reported as restored.
+    restored: list[str] = []
     try:
         archive = backup_path()
         if not archive.exists():
             return
-        paths = _local_data_paths()
-        restored: list[str] = []
         with zipfile.ZipFile(archive) as z:
             held = set(z.namelist())
             for name, path in paths.items():
                 if path.exists() or name not in held:
                     continue
-                path.parent.mkdir(parents=True, exist_ok=True)
-                # Through a temporary file, because of the rule right above:
-                # writing the destination directly leaves a partial file if this
-                # is interrupted, and the next run would see a file that exists
-                # and refuse to restore over it. A half-written registry would
-                # block automatic recovery for good.
-                tmp = path.with_name(path.name + ".restoring")
                 try:
-                    tmp.write_bytes(z.read(name))
-                    os.replace(tmp, path)
-                finally:
-                    tmp.unlink(missing_ok=True)
+                    _restore_member(z, name, path)
+                except Exception as e:
+                    # Per member, because the members are independent copies of
+                    # independent files. One damaged member used to reach the
+                    # outer handler and end the restore, and devices.yaml is
+                    # attempted first: a bad CRC on the registry hid an intact
+                    # secrets.yaml behind it, the flash then minted a new
+                    # identity and wrote a one-clock secrets.yaml, and the next
+                    # backup replaced the archive that still held every old key.
+                    print(
+                        f"warning: could not restore {name} from the safety backup "
+                        f"{archive}: {e}",
+                        file=sys.stderr,
+                    )
+                    continue
                 restored.append(name)
     except Exception as e:
         if archive is None:
             print(f"warning: could not read the safety backup: {e}", file=sys.stderr)
         else:
             print(f"warning: could not read the safety backup {archive}: {e}", file=sys.stderr)
-        return
     if not restored:
         return
     for name in restored:
