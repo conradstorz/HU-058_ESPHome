@@ -639,6 +639,17 @@ def test_backup_warns_and_does_not_raise_when_it_cannot_write(tmp_path, monkeypa
     assert "warning" in capsys.readouterr().err
 
 
+def test_backup_warns_and_does_not_raise_when_the_backup_dir_cannot_be_resolved(tmp_path, monkeypatch, capsys):
+    # backup_path() is inside the guard too: a flash must survive anything
+    # platformdirs does, not just an unwritable directory.
+    _local_data(tmp_path, monkeypatch)
+    monkeypatch.setattr(flash, "backup_dir", lambda: (_ for _ in ()).throw(RuntimeError("no data dir")))
+
+    flash.backup_local_data()
+
+    assert "no data dir" in capsys.readouterr().err
+
+
 # --- the build cache --------------------------------------------------------
 
 # ESPHome installs ccache with the ESP-IDF tools but resolves whether to use it

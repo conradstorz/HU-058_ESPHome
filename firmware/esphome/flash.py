@@ -450,9 +450,10 @@ def backup_local_data() -> None:
     Never raises. Firmware getting onto the board matters more than the copy,
     so every failure warns and returns.
     """
-    target = backup_path()
-    tmp = target.with_name(target.name + ".tmp")
+    tmp = None
     try:
+        target = backup_path()
+        tmp = target.with_name(target.name + ".tmp")
         candidates = _backup_candidates(_local_data_paths())
         names = {n for n, _ in candidates}
         # Any member the archive holds and this run does not is a loss. A
@@ -502,10 +503,11 @@ def backup_local_data() -> None:
         os.chmod(target, 0o600)
     except Exception as e:
         print(f"warning: could not write the safety backup: {e}", file=sys.stderr)
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 # --- resolution -------------------------------------------------------------
