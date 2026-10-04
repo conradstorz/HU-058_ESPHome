@@ -18,8 +18,9 @@ import re
 import secrets as pysecrets
 import subprocess
 import sys
+import zipfile
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -288,6 +289,41 @@ def build_env() -> dict[str, str]:
     # still gets the default.
     env.setdefault("CCACHE_MAXSIZE", "20G")
     return env
+
+
+# --- safety backup ----------------------------------------------------------
+
+ARCHIVE_NAME = "HU-058_clock_safety_backup_of_local_data.zip"
+BACKUP_MEMBERS = ("devices.yaml", "secrets.yaml")
+
+
+def backup_dir() -> Path:
+    """The per-workstation directory holding the safety archive.
+
+    Outside the repository on purpose. Both files it protects are gitignored,
+    and git removes an untracked ignored file without a word in three
+    situations: a pull carrying the commit that untracked it, a checkout of any
+    commit from before that (which overwrites it, then deletes it again on the
+    way back), and `git clean -xdf`. A copy kept in the working tree would go
+    with the original.
+    """
+    import platformdirs
+
+    return Path(platformdirs.user_data_dir("HU-058_ESPHome", appauthor=False))
+
+
+def backup_path() -> Path:
+    return backup_dir() / ARCHIVE_NAME
+
+
+def _local_data_paths() -> dict[str, Path]:
+    """Archive member name -> where that file lives in this checkout.
+
+    The member names are fixed so an archive written by one clone restores
+    into another; the paths come from the module constants so the tests can
+    redirect them.
+    """
+    return {"devices.yaml": REGISTRY_PATH, "secrets.yaml": SECRETS_PATH}
 
 
 # --- resolution -------------------------------------------------------------

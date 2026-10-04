@@ -396,6 +396,39 @@ def test_check_shell_ignores_msystem_off_windows(monkeypatch):
     flash.check_shell()
 
 
+# --- the safety backup ------------------------------------------------------
+
+# devices.yaml and secrets.yaml are the only two files here that cannot be
+# recreated from the repository, and git removes untracked ignored files
+# without a word: on a pull carrying the commit that untracked them, on a
+# checkout of any commit from before that, and on git clean -xdf. The archive
+# lives outside the working tree because that is the only place git cannot
+# reach.
+
+def test_backup_path_is_the_named_archive_in_the_backup_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path)
+
+    assert flash.backup_path() == tmp_path / flash.ARCHIVE_NAME
+    assert flash.ARCHIVE_NAME == "HU-058_clock_safety_backup_of_local_data.zip"
+
+
+def test_backup_dir_is_outside_the_repository():
+    assert flash.backup_dir().name == "HU-058_ESPHome"
+    assert flash.HERE not in flash.backup_dir().parents
+    assert flash.backup_dir() != flash.HERE
+
+
+def test_local_data_paths_follow_the_module_constants(tmp_path, monkeypatch):
+    monkeypatch.setattr(flash, "REGISTRY_PATH", tmp_path / "devices.yaml")
+    monkeypatch.setattr(flash, "SECRETS_PATH", tmp_path / "secrets.yaml")
+
+    assert flash._local_data_paths() == {
+        "devices.yaml": tmp_path / "devices.yaml",
+        "secrets.yaml": tmp_path / "secrets.yaml",
+    }
+    assert tuple(flash._local_data_paths()) == flash.BACKUP_MEMBERS
+
+
 # --- the build cache --------------------------------------------------------
 
 # ESPHome installs ccache with the ESP-IDF tools but resolves whether to use it
