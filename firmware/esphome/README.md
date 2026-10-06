@@ -33,37 +33,25 @@ in this README runs through `uv run`.
 
 ## Which ESP32
 
-I used a plain **ESP32-WROOM-32** devkit, the common 30 or 38 pin board that
-sells for a few dollars. Anything in that family works unchanged: WROOM-32,
-WROVER, DevKitC, NodeMCU-32S. If the listing says ESP32 with no letter after
-it, that is the one. You will need a board that can be powered directly from 5V on the USB port on the clock, and the WROOM-32 board has a voltage regulator on board for this.
+These are the boards that can be programmed to run the clock: the plain
+**ESP32-WROOM-32** devkit family, the common 30 or 38 pin board that sells for
+a few dollars. WROOM-32, WROVER, DevKitC and NodeMCU-32S all work unchanged. If
+the listing says ESP32 with no letter after it, that is the one. It needs to be
+a board that can be powered directly from 5V on the clock's USB port, and these
+all have a 3.3V regulator on board for that.
+
+Nothing else is supported. `flash.py` checks the chip before it writes
+anything and refuses any board that is not a classic ESP32 with esptool's own
+"This chip is X, not ESP32" message, so a mistake costs nothing. That includes
+the kit's own ESP8266, which has none of the timer and GPIO machinery the scan
+leans on, and the newer ESP32-S2, S3, C3 and C6, on which this driver has never
+been built or timed. What a port to those would take is written up in
+`../../possible-future-directions.md`.
 
 The four display pins have to sit below GPIO32. A frame goes out as a single
 store to the low GPIO output register, and that register only reaches GPIO0
 through GPIO31. `__init__.py` checks this and refuses to build if you pick a
 higher pin.
-
-### S2, S3, C3 and C6
-
-These need a small code change, and I have not tried any of them.
-
-Those chips declare the GPIO output registers as unions, so the bare
-assignments in `send_pair_()` do not compile:
-
-```cpp
-GPIO.out_w1ts = set;      // classic ESP32
-GPIO.out_w1ts.val = set;  // everything newer
-```
-
-Nine lines in that one function, plus `board:` in `clock-base.yaml` changed to match
-your module. Nothing else should need touching.
-
-Config validation will not warn you, because the component accepts any ESP32.
-The first sign of trouble is a compile error inside `aip33628.cpp`.
-
-### ESP8266
-
-Nope, this requires an ESP32. The scan leans on `gptimer` and on that single-store frame send, so porting it is a real project rather than a config change.
 
 ## Setup
 
