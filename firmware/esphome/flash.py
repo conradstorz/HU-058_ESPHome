@@ -114,12 +114,19 @@ def render_device_yaml(name: str, friendly_name: str) -> str:
 
 # --- registry ---------------------------------------------------------------
 
+RESULTS = ("registered", "flashed", "build-failed", "flash-failed")
+
+
 @dataclass
 class Device:
     mac: str
     name: str
     friendly_name: str
     first_flashed: str
+    # How the most recent run against this clock ended, and when. None on an
+    # entry written before these fields existed; they fill in on the next run.
+    last_attempt: str | None = None
+    last_result: str | None = None
 
 
 def load_registry_text(text: str, label: str) -> list[Device]:
@@ -143,15 +150,25 @@ def load_registry_text(text: str, label: str) -> list[Device]:
     devices = raw.get("devices")
     if devices is not None and not isinstance(devices, list):
         raise FlashError(f"{label}: 'devices' should be a list")
-    return [
-        Device(
-            mac=normalize_mac(str(d["mac"])),
-            name=str(d["name"]),
-            friendly_name=str(d["friendly_name"]),
-            first_flashed=str(d["first_flashed"]),
+    out = []
+    for d in devices or []:
+        result = d.get("last_result")
+        if result is not None and str(result) not in RESULTS:
+            raise FlashError(
+                f"{label}: last_result {result!r} for {d.get('name')} is not one of "
+                f"{', '.join(RESULTS)}"
+            )
+        out.append(
+            Device(
+                mac=normalize_mac(str(d["mac"])),
+                name=str(d["name"]),
+                friendly_name=str(d["friendly_name"]),
+                first_flashed=str(d["first_flashed"]),
+                last_attempt=None if d.get("last_attempt") is None else str(d["last_attempt"]),
+                last_result=None if result is None else str(result),
+            )
         )
-        for d in devices or []
-    ]
+    return out
 
 
 def load_registry(path: Path) -> list[Device]:
@@ -168,7 +185,7 @@ def save_registry(path: Path, devices: list[Device]) -> None:
         "# all-digit MAC would otherwise parse as a YAML 1.1 sexagesimal integer.\n"
     )
     body = yaml.safe_dump(
-        {"devices": [asdict(d) for d in devices]},
+        {"devices": [{k: v for k, v in asdict(d).items() if v is not None} for d in devices]},
         sort_keys=False,
         default_flow_style=False,
     )
@@ -181,6 +198,25 @@ def save_registry(path: Path, devices: list[Device]) -> None:
 def find_device(devices: list[Device], mac: str) -> Device | None:
     mac = normalize_mac(mac)
     return next((d for d in devices if d.mac == mac), None)
+
+
+def record_result(registry_path: Path, mac: str, now: datetime, result: str) -> Device:
+    """Note how this run ended against the clock's registry entry.
+
+    Overwrites the previous outcome: the registry answers "what happened last
+    time", not "what has ever happened". The entry has to exist already;
+    resolve_device() is the only thing that creates one.
+    """
+    if result not in RESULTS:
+        raise ValueError(f"unknown result {result!r}; expected one of {RESULTS}")
+    devices = load_registry(registry_path)
+    device = find_device(devices, mac)
+    if device is None:
+        raise FlashError(f"{normalize_mac(mac)} is not in {registry_path.name}; nothing to record against.")
+    device.last_attempt = now.isoformat(timespec="seconds")
+    device.last_result = result
+    save_registry(registry_path, devices)
+    return device
 
 
 # --- secrets ----------------------------------------------------------------

@@ -9,6 +9,9 @@ import yaml
 import flash
 
 
+NOW = datetime(2026, 9, 28, 14, 7, 0)
+
+
 # --- MAC handling -----------------------------------------------------------
 
 def test_normalize_mac_lowercases_and_uses_colons():
@@ -92,6 +95,100 @@ def test_load_registry_normalizes_macs_and_stringifies_dates(tmp_path):
     [d] = flash.load_registry(path)
     assert d.mac == "20:50:0d:17:f4:58"
     assert d.first_flashed == "2026-09-28"
+
+
+# --- outcome of the last attempt --------------------------------------------
+
+# The registry records how each clock's most recent run ended. The two fields
+# are optional on purpose: every devices.yaml written before they existed, and
+# the copy of one inside the safety archive, must still load.
+
+def test_registry_without_outcome_fields_loads_with_none():
+    text = (
+        "devices:\n"
+        "- mac: 'aa:bb:cc:dd:ee:ff'\n"
+        "  name: clock-x\n"
+        "  friendly_name: Clock X\n"
+        "  first_flashed: '2026-10-03'\n"
+    )
+    [d] = flash.load_registry_text(text, "devices.yaml")
+    assert d.last_attempt is None
+    assert d.last_result is None
+    assert d == flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03")
+
+
+def test_save_registry_omits_unset_outcome_fields(tmp_path):
+    reg = tmp_path / "devices.yaml"
+    flash.save_registry(reg, [flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03")])
+    text = reg.read_text()
+    assert "last_attempt" not in text
+    assert "last_result" not in text
+
+
+def test_registry_round_trips_outcome_fields(tmp_path):
+    reg = tmp_path / "devices.yaml"
+    d = flash.Device(
+        "aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03",
+        last_attempt="2026-10-06T09:00:00", last_result="flash-failed",
+    )
+    flash.save_registry(reg, [d])
+    assert flash.load_registry(reg) == [d]
+    assert "last_result: flash-failed" in reg.read_text()
+
+
+def test_load_registry_rejects_an_unknown_result():
+    text = (
+        "devices:\n"
+        "- mac: 'aa:bb:cc:dd:ee:ff'\n"
+        "  name: clock-x\n"
+        "  friendly_name: Clock X\n"
+        "  first_flashed: '2026-10-03'\n"
+        "  last_result: exploded\n"
+    )
+    with pytest.raises(flash.FlashError, match="last_result"):
+        flash.load_registry_text(text, "devices.yaml")
+
+
+def test_record_result_updates_the_matching_entry(tmp_path):
+    reg = tmp_path / "devices.yaml"
+    flash.save_registry(reg, [
+        flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03"),
+        flash.Device("11:22:33:44:55:66", "clock-y", "Clock Y", "2026-10-03"),
+    ])
+
+    updated = flash.record_result(reg, "AA:BB:CC:DD:EE:FF", NOW, "build-failed")
+
+    assert updated.last_attempt == "2026-09-28T14:07:00"
+    assert updated.last_result == "build-failed"
+    x, y = flash.load_registry(reg)
+    assert x == updated
+    assert y.last_result is None  # the other clock is untouched
+
+
+def test_record_result_overwrites_the_previous_outcome(tmp_path):
+    reg = tmp_path / "devices.yaml"
+    flash.save_registry(reg, [flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03")])
+    flash.record_result(reg, "aa:bb:cc:dd:ee:ff", NOW, "flash-failed")
+    later = NOW.replace(hour=15)
+
+    flash.record_result(reg, "aa:bb:cc:dd:ee:ff", later, "flashed")
+
+    [d] = flash.load_registry(reg)
+    assert (d.last_attempt, d.last_result) == ("2026-09-28T15:07:00", "flashed")
+
+
+def test_record_result_refuses_an_unknown_mac(tmp_path):
+    reg = tmp_path / "devices.yaml"
+    flash.save_registry(reg, [flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03")])
+    with pytest.raises(flash.FlashError, match="not in devices.yaml"):
+        flash.record_result(reg, "11:22:33:44:55:66", NOW, "flashed")
+
+
+def test_record_result_refuses_an_unknown_result(tmp_path):
+    reg = tmp_path / "devices.yaml"
+    flash.save_registry(reg, [flash.Device("aa:bb:cc:dd:ee:ff", "clock-x", "Clock X", "2026-10-03")])
+    with pytest.raises(ValueError):
+        flash.record_result(reg, "aa:bb:cc:dd:ee:ff", NOW, "exploded")
 
 
 def test_find_device_by_mac_in_any_case():
@@ -281,9 +378,6 @@ def test_read_mac_rejects_wrong_chip(monkeypatch):
 
 
 # --- resolve_device ---------------------------------------------------------
-
-NOW = datetime(2026, 9, 28, 14, 7, 0)
-
 
 def _layout(tmp_path):
     reg = tmp_path / "devices.yaml"
