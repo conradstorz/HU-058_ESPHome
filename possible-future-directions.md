@@ -242,7 +242,8 @@ path; it does not touch the gptimer that scans the panel.
 
 The pin depends on the devkit revision and ESPHome's board table does not
 record it: ESP32-S3-DevKitC-1 v1.0 uses GPIO48, v1.1 uses GPIO38. That is
-issue 9 in miniature - the chip cannot tell you, so the prompt has to. When
+the board-not-chip problem from "Half one" in miniature - the chip cannot
+tell you, so the prompt has to. When
 the answer is an S3-DevKitC-1, ask which revision and store it with the board.
 Keep the pin a substitution in the board package, with GPIO48 as the default
 for an `other` S3, and have the post-flash pin-out guide print which one it
@@ -251,7 +252,7 @@ classic ESP32 package keeps the plain GPIO2 output.
 
 #### C6: needs ESP-IDF, so defer it
 
-Resolved from the installed ESPHome, not from the old roadmap's guess. ESPHome
+Resolved from the installed ESPHome, not from an earlier unchecked guess. ESPHome
 2026.9 refuses `framework: type: arduino` for the C6; it is only allowed for
 ESP32, C3, S2 and S3. A C6 package would have to set `type: esp-idf` and the
 rest of `clock-base.yaml` would need to be checked under that framework. The
