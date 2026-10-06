@@ -1042,7 +1042,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # esphome run compiles and uploads in one command, and its exit code does
     # not say which half failed. Compiling first on its own tells them apart;
-    # the run's own compile pass is then a no-op.
+    # the run's own compile pass then finds nothing changed, which is quick
+    # but still visible to the user.
     device_yaml = f"{device.name}.yaml"
     env = build_env()
     rc = subprocess.call([sys.executable, "-m", "esphome", "compile", device_yaml], cwd=HERE, env=env)
