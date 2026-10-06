@@ -4,6 +4,8 @@ Every clock is keyed by its ESP32 factory MAC address. A MAC seen for the
 first time gets a name from the current time, a fresh API key and OTA
 password appended to secrets.yaml, a registry entry in devices.yaml and a
 <name>.yaml device file. A MAC seen before gets exactly what it had.
+Every run also notes in the registry how it ended: registered, flashed,
+build-failed or flash-failed, with the time.
 
 Usage:
     uv run flash.py [--port COMx] [--register-only] [esphome run args...]
@@ -1019,11 +1021,35 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"Known clock on {port} with MAC {mac}: {device.name} ({device.friendly_name}).")
 
+    def record(result: str) -> None:
+        # The outcome is bookkeeping. A registry that will not take it is worth
+        # a warning, never worth hiding how the flash itself went.
+        try:
+            record_result(REGISTRY_PATH, mac, _now(), result)
+        except FlashError as e:
+            print(f"warning: {e}", file=sys.stderr)
+        backup_local_data()
+
     if args.register_only:
+        record("registered")
         return 0
 
-    cmd = [sys.executable, "-m", "esphome", "run", f"{device.name}.yaml", "--device", port, *extra]
-    return subprocess.call(cmd, cwd=HERE, env=build_env())
+    # esphome run compiles and uploads in one command, and its exit code does
+    # not say which half failed. Compiling first on its own tells them apart;
+    # the run's own compile pass is then a no-op.
+    device_yaml = f"{device.name}.yaml"
+    env = build_env()
+    rc = subprocess.call([sys.executable, "-m", "esphome", "compile", device_yaml], cwd=HERE, env=env)
+    if rc != 0:
+        record("build-failed")
+        return rc
+    rc = subprocess.call(
+        [sys.executable, "-m", "esphome", "run", device_yaml, "--device", port, *extra],
+        cwd=HERE,
+        env=env,
+    )
+    record("flashed" if rc == 0 else "flash-failed")
+    return rc
 
 
 if __name__ == "__main__":

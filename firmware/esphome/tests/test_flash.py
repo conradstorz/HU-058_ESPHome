@@ -478,15 +478,20 @@ def test_main_flashes_known_device_and_passes_args(tmp_path, monkeypatch):
     monkeypatch.setattr(flash, "find_port", lambda explicit: "COM4")
     monkeypatch.setattr(flash, "read_mac", lambda port: "aa:bb:cc:dd:ee:ff")
     calls = []
-    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: calls.append((cmd, kw)) or 7)
+    codes = iter([0, 7])
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: calls.append((cmd, kw)) or next(codes))
 
     rc = flash.main(["--no-logs"])
 
     assert rc == 7
-    cmd, kw = calls[0]
-    assert cmd[:2] == [flash.sys.executable, "-m"]
-    assert cmd[2:] == ["esphome", "run", "clock-20260928-1407.yaml", "--device", "COM4", "--no-logs"]
-    assert kw["cwd"] == tmp_path
+    compile_cmd, compile_kw = calls[0]
+    run_cmd, run_kw = calls[1]
+    assert compile_cmd[:2] == [flash.sys.executable, "-m"]
+    assert compile_cmd[2:] == ["esphome", "compile", "clock-20260928-1407.yaml"]
+    assert run_cmd[:2] == [flash.sys.executable, "-m"]
+    assert run_cmd[2:] == ["esphome", "run", "clock-20260928-1407.yaml", "--device", "COM4", "--no-logs"]
+    assert compile_kw["cwd"] == tmp_path
+    assert run_kw["cwd"] == tmp_path
 
 
 def test_main_reports_flash_error(tmp_path, monkeypatch, capsys):
@@ -1687,6 +1692,91 @@ def test_main_returns_the_flash_exit_code_even_if_the_backup_fails(tmp_path, mon
     assert "warning" in capsys.readouterr().err
 
 
+# --- recording the outcome ----------------------------------------------------
+
+# esphome run compiles and uploads in one go and its exit code does not say
+# which half failed, so main() compiles first on its own. A failed compile is
+# recorded as build-failed and the upload never starts; a failed upload after
+# a clean compile is flash-failed.
+
+def _main_layout(tmp_path, monkeypatch):
+    monkeypatch.delenv("MSYSTEM", raising=False)  # not Git Bash
+    reg, sec = _layout(tmp_path)
+    flash.resolve_device("aa:bb:cc:dd:ee:ff", NOW, reg, sec, tmp_path)
+    monkeypatch.setattr(flash, "backup_dir", lambda: tmp_path / "backup")
+    monkeypatch.setattr(flash, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(flash, "SECRETS_PATH", sec)
+    monkeypatch.setattr(flash, "HERE", tmp_path)
+    monkeypatch.setattr(flash, "find_port", lambda explicit: "COM4")
+    monkeypatch.setattr(flash, "read_mac", lambda port: "aa:bb:cc:dd:ee:ff")
+    monkeypatch.setattr(flash, "_now", lambda: NOW.replace(hour=16))
+    return reg
+
+
+def _outcome(reg):
+    [d] = flash.load_registry(reg)
+    return d.last_attempt, d.last_result
+
+
+def test_main_records_flashed_after_a_clean_run(tmp_path, monkeypatch):
+    reg = _main_layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: 0)
+
+    assert flash.main([]) == 0
+    assert _outcome(reg) == ("2026-09-28T16:07:00", "flashed")
+
+
+def test_main_records_build_failed_and_does_not_upload(tmp_path, monkeypatch):
+    reg = _main_layout(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: calls.append(cmd) or 3)
+
+    assert flash.main([]) == 3
+    assert _outcome(reg) == ("2026-09-28T16:07:00", "build-failed")
+    assert len(calls) == 1
+    assert calls[0][2:4] == ["esphome", "compile"]
+
+
+def test_main_records_flash_failed_when_only_the_upload_fails(tmp_path, monkeypatch):
+    reg = _main_layout(tmp_path, monkeypatch)
+    codes = iter([0, 7])
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: next(codes))
+
+    assert flash.main([]) == 7
+    assert _outcome(reg) == ("2026-09-28T16:07:00", "flash-failed")
+
+
+def test_main_records_registered_under_register_only(tmp_path, monkeypatch):
+    reg = _main_layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(flash.subprocess, "call", lambda *a, **k: pytest.fail("esphome must not run"))
+
+    assert flash.main(["--register-only"]) == 0
+    assert _outcome(reg) == ("2026-09-28T16:07:00", "registered")
+
+
+def test_main_backup_holds_the_outcome(tmp_path, monkeypatch):
+    _main_layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: 0)
+
+    flash.main([])
+
+    with zipfile.ZipFile(flash.backup_path()) as z:
+        assert "last_result: flashed" in z.read("devices.yaml").decode()
+
+
+def test_main_keeps_the_flash_exit_code_if_recording_fails(tmp_path, monkeypatch, capsys):
+    reg = _main_layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: 0)
+
+    def boom(*a, **k):
+        raise flash.FlashError("registry is read-only")
+
+    monkeypatch.setattr(flash, "record_result", boom)
+
+    assert flash.main([]) == 0
+    assert "warning: registry is read-only" in capsys.readouterr().err
+
+
 # --- the build cache --------------------------------------------------------
 
 # ESPHome installs ccache with the ESP-IDF tools but resolves whether to use it
@@ -1797,7 +1887,7 @@ def test_main_hands_the_build_env_to_esphome(tmp_path, monkeypatch):
 
     flash.main([])
 
-    assert calls[0]["env"] == {"PATH": "sentinel"}
+    assert [c["env"] for c in calls] == [{"PATH": "sentinel"}, {"PATH": "sentinel"}]
 
 
 # --- the example registry ---------------------------------------------------
