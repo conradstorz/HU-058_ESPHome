@@ -11,6 +11,10 @@
 # integer. `name` is what Home Assistant knows the clock as and what its
 # api_key_<name> and ota_password_<name> secrets are named after, so it is the
 # one field that must never change for a clock already paired.
+#
+# `last_attempt` and `last_result` say how the most recent run against that
+# clock ended: registered, flashed, build-failed or flash-failed. They are
+# absent on an entry that predates them and fill in on its next run.
 
 devices:
 - mac: '24:0a:c4:00:00:01'
@@ -21,3 +25,5 @@ devices:
   name: clock-20260929-0912
   friendly_name: Clock 2026-09-29 09:12
   first_flashed: '2026-09-29T09:12:50'
+  last_attempt: '2026-10-06T10:41:03'
+  last_result: flashed

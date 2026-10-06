@@ -130,9 +130,14 @@ USB and looks it up in `devices.yaml`:
 - **A clock it has never seen** gets a name from the current time,
   `clock-YYYYMMDD-HHMM`, a fresh API key and OTA password appended to
   `secrets.yaml`, an entry in `devices.yaml`, and a `<name>.yaml` device file
-  next to this README. Then it flashes.
+  next to this README. Then it compiles and flashes.
 - **A clock it has seen** gets exactly the identity it had, so reflashing
   never disturbs its pairing with Home Assistant.
+- **Either way the entry records how the run ended**: `last_attempt` is the
+  time and `last_result` is one of `registered`, `flashed`, `build-failed` or
+  `flash-failed`. The build runs on its own before the upload so the two
+  failures are told apart. One look at `devices.yaml` says which boards on
+  the bench have a working clock on them and which were tried and did not.
 
 That is how several clocks live side by side: each one is a separate ESPHome
 node with its own secrets, all built from `clock-base.yaml`. The first clock
