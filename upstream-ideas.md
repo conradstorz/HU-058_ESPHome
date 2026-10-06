@@ -16,7 +16,7 @@ cloned from, so the fork is strictly ahead and nothing needs merging down.
 | 2, heartbeat LED | [#8](https://github.com/misterblack1/HU-058_ESPHome/pull/8) | `upstream-heartbeat` | 2026-09-30 | open, waiting |
 | 3, second clock | not opened | `upstream-second-clock`, pushed, one commit `5ea4927` | | on hold |
 | 4, config split | not opened | | | on hold |
-| 5, `flash.py` | not opened | | | on hold, see "What comes next" |
+| 5, `flash.py` | not opened | | | on hold |
 
 Both open PRs were cut from `upstream/main` at `10b2d64`, validated with
 `esphome config clock.yaml` on ESPHome 2026.9.0 against a `secrets.yaml`
@@ -35,9 +35,10 @@ Three possible outcomes and what each means for the rest of this file:
   the merged `upstream/main`.
 - **Rejected or changes requested.** Read the reasons before touching
   PR 3; the objection may apply to the whole sequence.
-- **Ignored for a month or more.** Stop offering small steps. Build the
-  easy-flash system on the fork instead and, if anything goes upstream
-  later, offer it as one self-contained PR.
+- **Ignored for a month or more.** Stop offering small steps. The fork's
+  `flash.py` and per-clock device files are the way this project flashes
+  regardless; if anything goes upstream later, offer PRs 3 to 5 together as
+  one self-contained PR.
 
 Lessons from opening the first two, for whoever prepares the next one:
 
@@ -129,8 +130,9 @@ Why it is the first code change:
 
 Caveats stated in the PR text: GPIO2 is the classic ESP32 devkit LED.
 Other boards put their LED elsewhere or use a WS2812, so the block is a
-no-op there rather than a fault. See
-`automatic-board-detection-roadmap.md`. GPIO2 is also a strapping pin, so
+no-op there rather than a fault; this fork supports only the classic
+ESP32, and `possible-future-directions.md` has the notes on the rest.
+GPIO2 is also a strapping pin, so
 `esphome config` prints ESPHome's standard strapping-pin warning; the PR
 deliberately leaves it visible and mentions `ignore_strapping_warning:
 true` as the maintainer's option. That was a conscious choice: the block
@@ -279,28 +281,6 @@ Why it comes last:
   repo. The maintainer has to decide whether to own a Python tool before
   judging whether it is a good one, which is the opposite of obvious at a
   glance.
-
-## What comes next: the easy-flash system
-
-The plan, as of 2026-09-30, is to return to this project after the two
-PRs have had time to be answered and combine PR 3, PR 4, PR 5 and stages
-3 and 4 of `automatic-board-detection-roadmap.md` into one comprehensive
-"easy flash" system on the fork. The target experience:
-
-- Plug in any supported ESP32 board, run one command, done.
-- The tool recognises the board by chip type (esptool `--chip auto`) and
-  by MAC (the `devices.yaml` registry), so a board it has seen before
-  gets its name, secrets and Home Assistant pairing back, and a new board
-  gets a fresh identity and the right per-chip config package.
-- Any number of clocks on one Home Assistant, each its own ESPHome node
-  with its own API key and OTA password, managed from one directory.
-
-Whether that goes upstream at all depends on the outcome of #7 and #8
-(see "Status"). If it does, it goes as one self-contained PR with its
-tests, and PR 3 and PR 4 below become the description of its file shape
-rather than separate steps. The per-PR notes below are kept because they
-still describe the smallest reviewable pieces if the maintainer prefers
-steps.
 
 ## Not for upstream
 
