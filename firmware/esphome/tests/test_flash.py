@@ -1685,7 +1685,8 @@ def test_main_returns_the_flash_exit_code_even_if_the_backup_fails(tmp_path, mon
     monkeypatch.setattr(flash, "find_port", lambda explicit: "COM4")
     monkeypatch.setattr(flash, "read_mac", lambda port: "aa:bb:cc:dd:ee:ff")
     monkeypatch.setattr(flash, "_now", lambda: NOW)
-    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: 7)
+    codes = iter([0, 7])
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: next(codes))
     (tmp_path / "backup").write_text("")  # a file where the directory needs to be
 
     assert flash.main([]) == 7
@@ -1775,6 +1776,23 @@ def test_main_keeps_the_flash_exit_code_if_recording_fails(tmp_path, monkeypatch
 
     assert flash.main([]) == 0
     assert "warning: registry is read-only" in capsys.readouterr().err
+
+
+def test_main_keeps_the_flash_exit_code_if_the_registry_is_unreadable(tmp_path, monkeypatch, capsys):
+    # A KeyError, not a FlashError: the registry was truncated between the
+    # read that resolved the clock and the write that records the outcome.
+    reg = _main_layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(flash.subprocess, "call", lambda cmd, **kw: 0)
+    real_record = flash.record_result
+
+    def truncated(*a, **k):
+        reg.write_text("devices:\n- mac: 'aa:bb:cc:dd:ee:ff'\n  name: clock-x\n")
+        return real_record(*a, **k)
+
+    monkeypatch.setattr(flash, "record_result", truncated)
+
+    assert flash.main([]) == 0
+    assert "warning:" in capsys.readouterr().err
 
 
 # --- the build cache --------------------------------------------------------

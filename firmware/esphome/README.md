@@ -124,8 +124,10 @@ USB and looks it up in `devices.yaml`:
 - **Either way the entry records how the run ended**: `last_attempt` is the
   time and `last_result` is one of `registered`, `flashed`, `build-failed` or
   `flash-failed`. The build runs on its own before the upload so the two
-  failures are told apart. One look at `devices.yaml` says which boards on
-  the bench have a working clock on them and which were tried and did not.
+  failures are told apart; the upload step then re-runs the compile over
+  unchanged sources, which is quick but visible. One look at `devices.yaml`
+  says how the last run against each board on the bench went, including the
+  ones that were tried and did not take.
 
 That is how several clocks live side by side: each one is a separate ESPHome
 node with its own secrets, all built from `clock-base.yaml`. The first clock

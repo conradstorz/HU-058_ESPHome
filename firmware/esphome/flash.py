@@ -1024,9 +1024,15 @@ def main(argv: list[str] | None = None) -> int:
     def record(result: str) -> None:
         # The outcome is bookkeeping. A registry that will not take it is worth
         # a warning, never worth hiding how the flash itself went.
+        #
+        # Deliberately broad, like the probe in _backup_candidates: load_registry()
+        # raises KeyError on an entry truncated mid-write and ValueError on a
+        # mangled MAC, neither of which is a FlashError, and a compile and upload
+        # take minutes during which the registry can be damaged. Letting one
+        # escape would turn a successful flash into a traceback.
         try:
             record_result(REGISTRY_PATH, mac, _now(), result)
-        except FlashError as e:
+        except Exception as e:
             print(f"warning: {e}", file=sys.stderr)
         backup_local_data()
 

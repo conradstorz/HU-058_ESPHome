@@ -130,9 +130,9 @@ and 15. Devkit LED on GPIO2.
 #### ESP32-S3
 
 Compiles unchanged. `out_w1ts` and `out_w1tc` are plain `uint32_t` in IDF
-5.5.5, so the README's `.val` note does not apply. `gptimer` and `IRAM_ATTR`
-carry over. GPIO store speed and interrupt latency are at least as good as the
-classic part, so the timing margins hold.
+5.5.5, so the `.val` note that used to be in the firmware README does not
+apply. `gptimer` and `IRAM_ATTR` carry over. GPIO store speed and interrupt
+latency are at least as good as the classic part, so the timing margins hold.
 
 What blocks it, in order:
 
